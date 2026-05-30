@@ -13,14 +13,13 @@ from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# RGB colour definitions
-COLOUR_OFF    = (0,   0,   0)
-COLOUR_GREEN  = (0,   255, 0)
-COLOUR_RED    = (255, 0,   0)
-COLOUR_YELLOW = (255, 180, 0)
+# GRB colour definitions
+COLOUR_GREEN  = (255, 0,   0)
+COLOUR_RED    = (0,   255, 0)
+COLOUR_YELLOW = (180, 255, 0)
 COLOUR_BLUE   = (0,   0,   150)
-COLOUR_WHITE  = (80,  80,  80)   # dim white for idle real mode
-COLOUR_PINK   = (100, 0,   50)   # dim for idle paper mode
+COLOUR_WHITE  = (80,  80,  80)
+COLOUR_PINK   = (0,   100, 50)
 
 FLASH_COUNT   = 3
 FLASH_ON_SEC  = 0.2
@@ -81,9 +80,8 @@ class LEDManager:
         try:
             import board
             import neopixel
-            self._pixel = neopixel.NeoPixel(
-                board.D18, 1, brightness=0.3, auto_write=True
-            )
+            self._pixel = pixel = neopixel.NeoPixel(
+                board.D18, 1, brightness=0.3, auto_write=True)
             logger.info("LEDManager: WS2812D initialised on GPIO 18")
         except Exception as exc:
             logger.error("LEDManager: failed to init LED: %s", exc)
