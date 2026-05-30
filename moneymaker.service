@@ -1,0 +1,26 @@
+[Unit]
+Description=Moneymaker Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/moneymaker
+ExecStart=/home/pi/moneymaker/venv/bin/python3 /home/pi/moneymaker/src/main.py
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=moneymaker
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

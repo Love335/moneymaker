@@ -1,0 +1,14 @@
+luma.led_matrix
+RPi.GPIO
+rpi-ws281x
+adafruit-blinka
+adafruit-circuitpython-neopixel
+spidev
+avanza-api
+yfinance
+pandas
+numpy
+pyotp
+requests
+python-dotenv
+pytest
