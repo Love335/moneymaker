@@ -227,66 +227,66 @@ def test_led() -> None:
 #  Uncomment this section once buttons are soldered and wired
 # ══════════════════════════════════════════════════════════════
 
-# def test_buttons() -> None:
-#     section("TEST 3: Pushbuttons — YES, NO, MODE")
-#     print("  Wiring check:")
-#     print("    YES button  lug 1 → Pi Pin 36 (GPIO 16)")
-#     print("    YES button  lug 2 → Pi Pin 39 (GND)")
-#     print("    NO button   lug 1 → Pi Pin 38 (GPIO 20)")
-#     print("    NO button   lug 2 → Pi Pin 39 (GND, shared)")
-#     print("    MODE button lug 1 → Pi Pin 40 (GPIO 21)")
-#     print("    MODE button lug 2 → Pi Pin 39 (GND, shared)")
-#
-#     if not ask_to_begin("button test"):
-#         return
-#
-#     import RPi.GPIO as GPIO
-#
-#     PINS = {
-#         "YES":  16,
-#         "NO":   20,
-#         "MODE": 21,
-#     }
-#
-#     try:
-#         GPIO.setmode(GPIO.BCM)
-#         for name, pin in PINS.items():
-#             GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-#         print("  Buttons initialised successfully")
-#     except Exception as exc:
-#         print(f"  FAILED to initialise buttons: {exc}")
-#         GPIO.cleanup()
-#         return
-#
-#     print()
-#     print("  Press each button when prompted.")
-#     print("  You have 10 seconds per button. Press Enter to skip.")
-#
-#     for name, pin in PINS.items():
-#         step(f"Press the {name} button now (10s)...")
-#         detected = False
-#         deadline = time.monotonic() + 10
-#         while time.monotonic() < deadline:
-#             ready, _, _ = select.select([sys.stdin], [], [], 0.02)
-#             if ready:
-#                 sys.stdin.readline()
-#                 print(f"  Skipped {name} button.")
-#                 break
-#             if GPIO.input(pin) == GPIO.LOW:
-#                 detected = True
-#                 break
-#             time.sleep(0.01)
-#         if detected:
-#             ok(f"{name} button detected")
-#             while GPIO.input(pin) == GPIO.LOW:
-#                 time.sleep(0.02)
-#             time.sleep(0.2)
-#         elif not ready:
-#             print(f"  [✗] TIMEOUT — {name} button not detected")
-#             print(f"       Check GPIO {pin} wiring")
-#
-#     GPIO.cleanup()
-#     print("\n  Button test complete.")
+def test_buttons() -> None:
+    section("TEST 3: Pushbuttons — YES, NO, MODE")
+    print("  Wiring check:")
+    print("    YES button  lug 1 → Pi Pin 36 (GPIO 16)")
+    print("    YES button  lug 2 → Pi Pin 39 (GND)")
+    print("    NO button   lug 1 → Pi Pin 38 (GPIO 20)")
+    print("    NO button   lug 2 → Pi Pin 39 (GND, shared)")
+    print("    MODE button lug 1 → Pi Pin 40 (GPIO 21)")
+    print("    MODE button lug 2 → Pi Pin 39 (GND, shared)")
+
+    if not ask_to_begin("button test"):
+        return
+
+    import RPi.GPIO as GPIO
+
+    PINS = {
+        "YES":  16,
+        "NO":   20,
+        "MODE": 21,
+    }
+
+    try:
+        GPIO.setmode(GPIO.BCM)
+        for name, pin in PINS.items():
+            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        print("  Buttons initialised successfully")
+    except Exception as exc:
+        print(f"  FAILED to initialise buttons: {exc}")
+        GPIO.cleanup()
+        return
+
+    print()
+    print("  Press each button when prompted.")
+    print("  You have 10 seconds per button. Press Enter to skip.")
+
+    for name, pin in PINS.items():
+        step(f"Press the {name} button now (10s)...")
+        detected = False
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+            if ready:
+                sys.stdin.readline()
+                print(f"  Skipped {name} button.")
+                break
+            if GPIO.input(pin) == GPIO.LOW:
+                detected = True
+                break
+            time.sleep(0.01)
+        if detected:
+            ok(f"{name} button detected")
+            while GPIO.input(pin) == GPIO.LOW:
+                time.sleep(0.02)
+            time.sleep(0.2)
+        elif not ready:
+            print(f"  [✗] TIMEOUT — {name} button not detected")
+            print(f"       Check GPIO {pin} wiring")
+
+    GPIO.cleanup()
+    print("\n  Button test complete.")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -510,7 +510,7 @@ def main() -> None:
         test_combined()
 
         # ── Uncomment as you wire more components ─────────────
-        # test_buttons()
+        test_buttons()
         # test_encoder()
         # test_power_switch()
 
