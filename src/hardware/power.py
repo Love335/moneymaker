@@ -1,59 +1,57 @@
 """
-power.py — Power switch monitor with suspend/resume support.
+power.py — Power management for the moneymaker trading bot.
 
-Switch ON  → bot runs normally
-Switch OFF → bot suspends (deep sleep, all connections closed)
-Switch ON  → bot resumes automatically
+The physical power switch is now handled entirely at the kernel level
+via dtoverlay=gpio-shutdown in /boot/config.txt. The switch is wired
+to GPIO 3 (Pin 5) and GND (Pin 6).
 
-This avoids true shutdown since the Pi cannot wake itself after
-a full poweroff without a hardware power switch on the supply.
+Switch behaviour:
+  - Pi is running: flip switch → kernel triggers graceful shutdown
+  - Pi is halted:  flip switch → GPIO 3 pulse restarts the Pi
+
+This class only provides the initiate_shutdown() method, which the
+engine can call programmatically when needed (e.g. from a menu option).
+No GPIO monitoring is done here — the kernel handles it.
 """
 
 import logging
 import subprocess
-import threading
-import time
 
-import RPi.GPIO as GPIO
-
-from core.events import EventBus, EventType, Event
+from core.events import EventBus
 
 logger = logging.getLogger(__name__)
 
-PIN_POWER_SWITCH = 26
-POLL_INTERVAL    = 0.1
 
 class PowerManager:
+    """
+    Provides programmatic shutdown capability.
 
-    PIN_ACTIVE_STATE = GPIO.HIGH   # HIGH = switch is OFF
+    The physical switch on GPIO 3 is handled by the kernel overlay
+    and does not require any Python code to monitor.
+    """
 
     def __init__(self, bus: EventBus) -> None:
-        self._bus                 = bus
-        self._running             = False
-        self._thread              = None
-        self._suspended           = False
-        self._shutdown_initiated  = False
+        self._bus                = bus
+        self._shutdown_initiated = False
 
     def start(self) -> None:
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(PIN_POWER_SWITCH, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        self._running = True
-        self._thread  = threading.Thread(
-            target=self._loop,
-            name="PowerManager",
-            daemon=False
+        """
+        Nothing to start — the kernel overlay handles the switch.
+        """
+        logger.info(
+            "PowerManager started — "
+            "physical switch handled by dtoverlay=gpio-shutdown on GPIO 3"
         )
-        self._thread.start()
-        logger.info("PowerManager started on GPIO %d", PIN_POWER_SWITCH)
 
     def stop(self) -> None:
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
         logger.info("PowerManager stopped")
 
     def initiate_shutdown(self) -> None:
-        """Called by engine for full OS shutdown (e.g. future hardware switch)."""
+        """
+        Trigger a graceful OS shutdown programmatically.
+        Called by the engine after cleanup is complete,
+        or can be triggered from the menu in future.
+        """
         if self._shutdown_initiated:
             return
         self._shutdown_initiated = True
@@ -62,44 +60,3 @@ class PowerManager:
             subprocess.run(["sudo", "shutdown", "now"], check=True)
         except Exception as exc:
             logger.error("PowerManager: shutdown command failed: %s", exc)
-
-    def _loop(self) -> None:
-        while self._running:
-            try:
-                state = GPIO.input(PIN_POWER_SWITCH)
-
-                if state == self.PIN_ACTIVE_STATE and not self._suspended:
-                    logger.info("PowerManager: switch OFF — suspending")
-                    self._suspended = True
-                    self._bus.publish(Event(
-                        type=EventType.SHUTDOWN_REQUESTED,
-                        source="PowerManager",
-                        payload={"reason": "suspend"}
-                    ))
-                    time.sleep(3)
-
-                elif state != self.PIN_ACTIVE_STATE and self._suspended:
-                    logger.info("PowerManager: switch ON — resuming")
-                    self._suspended = False
-                    self._bus.publish(Event(
-                        type=EventType.STARTUP_COMPLETE,
-                        source="PowerManager",
-                        payload={"reason": "resume"}
-                    ))
-
-                time.sleep(POLL_INTERVAL)
-
-            except RuntimeError as exc:
-                if "pin numbering" in str(exc):
-                    # GPIO was cleaned up by another component — reinitialise
-                    try:
-                        GPIO.setmode(GPIO.BCM)
-                        GPIO.setup(PIN_POWER_SWITCH, GPIO.IN,
-                                pull_up_down=GPIO.PUD_UP)
-                        logger.debug("PowerManager: GPIO reinitialised after cleanup")
-                    except Exception:
-                        pass
-                time.sleep(0.5)
-            except Exception:
-                logger.exception("PowerManager: error in poll loop")
-                time.sleep(1)

@@ -386,7 +386,6 @@ class Engine:
         self._bus.subscribe(EventType.CONNECTION_LOST,     self._on_connection_lost)
         self._bus.subscribe(EventType.API_ERROR,           self._on_api_error)
         self._bus.subscribe(EventType.BUTTON_YES_PRESSED,  self._on_yes_for_recovery)
-        self._bus.subscribe(EventType.STARTUP_COMPLETE, self._on_resume)
 
     def _on_market_opened(self, event: Event) -> None:
         logger.info("Market opened")
@@ -407,10 +406,7 @@ class Engine:
     def _on_shutdown_requested(self, event: Event) -> None:
         reason = event.payload.get("reason", "")
         logger.info("Shutdown requested: %s", reason)
-        if reason == "suspend":
-            self._perform_suspend()
-        else:
-            self._shutdown_event.set()
+        self._shutdown_event.set()
 
     def _on_mode_switched(self, event: Event) -> None:
         new_mode = self._state.switch_trading_mode()
@@ -495,151 +491,7 @@ class Engine:
             self._state.set_status(SystemStatus.AWAITING_RECOVERY)
             self._consecutive_recoveries = 0
 
-    # ── Shutdown ──────────────────────────────────────────────
-
-    def _perform_suspend(self) -> None:
-        """Suspend — stop all active subsystems and reduce power to minimum."""
-        logger.info("Performing suspend")
-        self._state.set_status(SystemStatus.SUSPENDED)
-
-        self._display.show_message("SUSPEND ")
-        time.sleep(1)
-        self._led.set_state(LEDState.OFF)
-
-        # Cancel any open orders
-        if self._broker:
-            try:
-                self._broker.cancel_all_orders()
-            except Exception:
-                logger.exception("Failed to cancel orders during suspend")
-
-        # Stop scheduler
-        if self._scheduler:
-            try:
-                self._scheduler.stop()
-            except Exception:
-                logger.exception("Error stopping scheduler during suspend")
-            self._scheduler = None
-
-        # Stop buttons
-        if self._buttons:
-            try:
-                self._buttons.stop()
-            except Exception:
-                logger.exception("Error stopping buttons during suspend")
-            self._buttons = None
-
-        # Clear price cache
-        if self._market_data:
-            self._market_data._cache.clear()
-
-        # Stop display
-        self._display.show_message("        ")
-        time.sleep(0.5)
-        self._display.stop()
-
-        # Reduce CPU to minimum frequency
-        try:
-            subprocess.run([
-                "sudo", "sh", "-c",
-                "echo powersave > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
-            ], check=True)
-            logger.info("CPU set to powersave mode")
-        except Exception as exc:
-            logger.warning("Could not set CPU governor: %s", exc)
-
-        # Disable Bluetooth
-        try:
-            subprocess.run(["sudo", "rfkill", "block", "bluetooth"], check=True)
-            logger.info("Bluetooth disabled")
-        except Exception as exc:
-            logger.warning("Could not disable Bluetooth: %s", exc)
-
-        # Disable HDMI
-        try:
-            subprocess.run(["sudo", "tvservice", "-o"], check=True)
-            logger.info("HDMI disabled")
-        except Exception as exc:
-            logger.warning("Could not disable HDMI: %s", exc)
-
-        # Bring down WiFi last
-        try:
-            subprocess.run(
-                ["sudo", "ip", "link", "set", "wlan0", "down"], check=True
-            )
-            logger.info("WiFi interface brought down")
-        except Exception as exc:
-            logger.warning("Could not bring down WiFi: %s", exc)
-
-        logger.info("Suspend complete — minimum power state achieved")
-
-    def _on_resume(self, event: Event) -> None:
-        """Wake the engine up from SUSPENDED state."""
-        if event.payload.get("reason") != "resume":
-            return
-        if self._state.snapshot().system_status != SystemStatus.SUSPENDED:
-            return
-
-        logger.info("Resuming system from suspend")
-
-        # Restore WiFi first and wait for reconnection
-        try:
-            subprocess.run(
-                ["sudo", "ip", "link", "set", "wlan0", "up"], check=True
-            )
-            time.sleep(3)
-            logger.info("WiFi interface restored")
-        except Exception as exc:
-            logger.warning("Could not restore WiFi: %s", exc)
-
-        # Restore CPU frequency
-        try:
-            subprocess.run([
-                "sudo", "sh", "-c",
-                "echo ondemand > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
-            ], check=True)
-            logger.info("CPU governor restored")
-        except Exception as exc:
-            logger.warning("Could not restore CPU governor: %s", exc)
-
-        # Re-enable Bluetooth
-        try:
-            subprocess.run(["sudo", "rfkill", "unblock", "bluetooth"], check=True)
-            logger.info("Bluetooth re-enabled")
-        except Exception as exc:
-            logger.warning("Could not re-enable Bluetooth: %s", exc)
-
-        # Re-enable HDMI
-        try:
-            subprocess.run(["sudo", "tvservice", "-p"], check=True)
-            logger.info("HDMI re-enabled")
-        except Exception as exc:
-            logger.warning("Could not re-enable HDMI: %s", exc)
-
-        # Restart display
-        self._display.start()
-        self._display.set_mode_char("P")
-        self._display.show_message("RESUMING")
-        self._led.set_state(LEDState.WORKING)
-
-        # Restart market data
-        self._market_data = MarketDataService(self._bus)
-
-        # Restart scheduler
-        self._scheduler = MarketScheduler(self._bus)
-        self._scheduler.start()
-
-        # Restart buttons
-        self._buttons = ButtonManager(self._bus)
-        self._buttons.start()
-
-        # Restore state
-        self._state.set_status(SystemStatus.RUNNING)
-        self._update_idle_led()
-        self._display.show_message("READY   ")
-        logger.info("Resume complete")
-        
-    # ── Helpers ───────────────────────────────────────────────
+    # ── Helpers ──────────────────────────────────────────────
 
     def _load_algorithm(self, name: str) -> None:
         cls = ALGORITHM_REGISTRY.get(name)
