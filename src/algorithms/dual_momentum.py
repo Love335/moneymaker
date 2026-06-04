@@ -31,7 +31,6 @@ CANDIDATE_TICKERS = [
     "SPY",                # S&P 500 (via Avanza international)
 ]
 
-SAFE_HAVEN_TICKER = "XACT-OBLIGATION.ST" # <-- FIXED
 # Minimum annualised return to prefer over cash (proxy for risk-free rate ~4%)
 ABSOLUTE_MOMENTUM_THRESHOLD = 0.04
 

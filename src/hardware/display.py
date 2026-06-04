@@ -38,6 +38,7 @@ class DisplayMessage:
     text:     str
     priority: MessagePriority = MessagePriority.NORMAL
     flash:    bool            = False   # flash instead of scroll if True
+    static:   bool            = False   # show immediately, no scroll
 
 
 class DisplayManager:
@@ -92,6 +93,12 @@ class DisplayManager:
         priority = MessagePriority.URGENT if urgent else MessagePriority.NORMAL
         self._queue.put(DisplayMessage(text=text, priority=priority))
 
+    def show_text(self, text: str) -> None:
+        self._queue.put(DisplayMessage(
+            text=text[:8].upper().ljust(8),
+            static=True,
+        ))
+
     def flash_message(self, text: str) -> None:
         """Queue a message to flash (not scroll) — for urgent alerts."""
         self._queue.put(DisplayMessage(
@@ -126,8 +133,10 @@ class DisplayManager:
                     msg = self._queue.get_nowait()
                     if msg.priority == MessagePriority.URGENT and msg.flash:
                         self._do_flash(msg.text)
+                    elif msg.static:
+                        self._write_raw(msg.text[:8].ljust(8))
                     else:
-                        self._do_scroll(msg.text)
+                        self._do_scroll(msg.text)                    
                     continue
                 except queue.Empty:
                     pass

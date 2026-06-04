@@ -99,8 +99,6 @@ class Engine:
             """Register hooks to catch systemd/OS shutdown signals."""
             signal.signal(signal.SIGTERM, self._handle_os_signal)
             signal.signal(signal.SIGINT, self._handle_os_signal)
-            # Catch the signal sent when SSH connection terminates
-            signal.signal(signal.SIGHUP, self._handle_os_signal)
 
     def _handle_os_signal(self, signum, frame) -> None:
         """Callback when Linux tells this process to stop."""
@@ -182,12 +180,6 @@ class Engine:
                 if self._shutdown_event.is_set():
                     self._perform_shutdown()
                     break
-
-                if snap.system_status == SystemStatus.SUSPENDED:
-                    # Instantly wakes up if shutdown happens during suspension
-                    if self._shutdown_event.wait(timeout=1):
-                        continue
-                    continue
 
                 now = time.monotonic() # Get current time once per tick
 
@@ -516,7 +508,7 @@ class Engine:
             self._broker.reset(snap.paper_balance or 10_000.0)
             self._state.update_pnl(0.0)
             self._display.update_pnl(0.0)
-            self._display.show_message("PAPER RESET")
+            self._display.show_message("RESET OK")
             logger.info("Paper portfolio reset")
 
     def _on_connection_lost(self, event: Event) -> None:

@@ -54,15 +54,14 @@ def main() -> None:
         is_fresh = not PORTFOLIO_FILE.exists()
 
         if is_fresh:
-            logger.info("No existing paper portfolio — running balance selector")
             selector = PaperBalanceSelector(display, led, bus)
             balance  = selector.run()
-            paper_broker = PaperBroker(starting_balance=balance)
             state.set_paper_balance(balance)
+            paper_broker = PaperBroker(starting_balance=balance)
             logger.info("Paper balance selected: %.2f SEK", balance)
         else:
+            paper_broker = PaperBroker()
             logger.info("Existing paper portfolio found — resuming")
-
         # Set initial display mode character
         display.set_mode_char("P")
 

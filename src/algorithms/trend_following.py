@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # Primary asset to follow trend on
 PRIMARY_TICKER  = "XACT-OMXS30.ST"   # Swedish large-cap index ETF
-BOND_TICKER     = "XACT-OBL.ST"      # Swedish bonds — safe haven
+BOND_TICKER     = "XACT-OBLIGATION.ST"      # Swedish bonds — safe haven
 
 # SMA periods
 SMA_LONG  = 200

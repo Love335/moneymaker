@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 class MenuOption(Enum):
-    SWITCH_MODE      = "SWITCH MODE"
-    SWITCH_ALGO      = "SWITCH ALGO"
-    RESET_PAPER      = "RESET PAPER"
-    VIEW_STATS       = "VIEW STATS"
+    SWITCH_MODE  = "  MODE  "
+    SWITCH_ALGO  = "  ALGO  "
+    RESET_PAPER  = "  RESET "
+    VIEW_STATS   = "  STATS "
 
 
 MENU_OPTIONS = [
@@ -90,7 +90,7 @@ class MenuManager:
                 # Show confirmation prompt
                 self._confirming = True
                 option = MENU_OPTIONS[self._option_index]
-                self._display.show_message(f"CONFIRM {option.value[:4]}?")
+                self._display.show_text("CONFIRM?")
             else:
                 # Execute the selected option
                 self._execute_option(MENU_OPTIONS[self._option_index])
@@ -135,7 +135,7 @@ class MenuManager:
 
     def _show_current_option(self) -> None:
         option = MENU_OPTIONS[self._option_index]
-        self._display.show_message(option.value)
+        self._display.show_text(option.value)
 
     # ── Option execution ──────────────────────────────────────
 
@@ -157,7 +157,7 @@ class MenuManager:
         elif option == MenuOption.RESET_PAPER:
             snap = self._state.snapshot()
             if snap.trading_mode != TradingMode.PAPER:
-                self._display.show_message("REAL MODE NO RESET")
+                self._display.show_text("REAL MOD")
             else:
                 self._bus.publish(Event(
                     type=EventType.PAPER_PORTFOLIO_RESET,
@@ -165,13 +165,10 @@ class MenuManager:
                 ))
 
         elif option == MenuOption.VIEW_STATS:
-            snap = self._state.snapshot()
-            pnl  = snap.current_pnl
-            algo = snap.active_algorithm.upper()[:8]
-            mode = snap.trading_mode.value
-            risk = f"{snap.risk_level:.0%}"
-            summary = (
-                f"MODE {mode} | ALGO {algo} | "
-                f"RISK {risk} | PNL {pnl:+.2f} SEK"
+            snap    = self._state.snapshot()
+            pnl     = snap.current_pnl
+            sign    = "+" if pnl >= 0 else "-"
+            # Show on display as scrolling message for stats only
+            self._display.show_message(
+                f"PNL {sign}{abs(pnl):.0f} SEK"
             )
-            self._display.show_message(summary)

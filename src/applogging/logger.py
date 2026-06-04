@@ -137,6 +137,12 @@ def classify_crash(exc: BaseException) -> tuple[str, bool]:
     exc_msg  = str(exc).lower()
     tb       = traceback.format_exc()
 
+    from trading.broker import BrokerError
+    if isinstance(exc, BrokerError) and any(
+        f in str(exc).lower() for f in UNRECOVERABLE_MESSAGE_FRAGMENTS
+    ):
+        return f"BrokerError: {exc} [unrecoverable]", False
+
     # Explicit unrecoverable checks first
     for fragment in UNRECOVERABLE_MESSAGE_FRAGMENTS:
         if fragment in exc_msg:

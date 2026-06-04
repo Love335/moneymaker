@@ -54,6 +54,24 @@ RETRY_DELAY_SECONDS = 10
 # Avanza sessions expire after ~30 minutes of inactivity
 SESSION_REFRESH_INTERVAL = 1500   # 25 minutes
 
+# Maps Yahoo Finance tickers → Avanza orderbook IDs
+# Find orderbook IDs from the URL when viewing a stock on avanza.se
+# e.g. avanza.se/aktier/om-aktien.html/5479/ericsson-b → ID is 5479
+TICKER_MAP: dict[str, str] = {
+    "XACT-OMXS30.ST":    "94",      # XACT OMXS30
+    "XACT-BULL.ST":      "96",      # XACT Bull
+    "XACT-OBLIGATION.ST": "98",     # XACT Obligation
+    "ERIC-B.ST":         "5479",    # Ericsson B
+    "VOLV-B.ST":         "3",       # Volvo B
+    "SEB-A.ST":          "1116",    # SEB A
+    "INVE-B.ST":         "36",      # Investor B
+    "SAND.ST":           "1298",    # Sandvik
+    "ATCO-A.ST":         "16",      # Atlas Copco A
+    "SWED-A.ST":         "1690",    # Swedbank A
+    "HM-B.ST":           "1286",    # H&M B
+    "SPY":               None,      # Not available on Avanza
+    "GLD":               None,      # Not available on Avanza
+}
 
 class AvanzaBroker(BaseBroker):
     """
@@ -157,10 +175,11 @@ class AvanzaBroker(BaseBroker):
         Return the current price for a ticker (orderbook ID) in SEK.
         Raises BrokerError if unavailable.
         """
+        orderbook_id = self._to_orderbook_id(ticker)
         with self._lock:
             self._ensure_connected()
             try:
-                data  = self._client.get_stock_info(ticker)
+                data  = self._client.get_stock_info(orderbook_id)
                 price = data.get("lastPrice") or data.get("buyPrice")
                 if price is None:
                     raise BrokerError(
@@ -187,6 +206,7 @@ class AvanzaBroker(BaseBroker):
         action:     "BUY" or "SELL"
         amount_sek: amount in SEK to spend (BUY) or target proceeds (SELL)
         """
+        orderbook_id = self._to_orderbook_id(ticker)
         with self._lock:
             self._ensure_connected()
 
@@ -233,7 +253,7 @@ class AvanzaBroker(BaseBroker):
 
                 result = self._client.place_order(
                     account_id=self._account_id,
-                    order_book_id=ticker,
+                    order_book_id=orderbook_id,
                     order_type=order_type,
                     price=price,
                     valid_until=valid_until,
@@ -396,3 +416,17 @@ class AvanzaBroker(BaseBroker):
                             "AvanzaBroker: session refresh failed: %s", exc
                         )
                         self._connected = False
+
+    def _to_orderbook_id(self, ticker: str) -> str:
+        if ticker not in TICKER_MAP:
+            raise BrokerError(
+                f"Ticker '{ticker}' has no Avanza orderbook ID mapping. "
+                f"Add it to TICKER_MAP in avanza_broker.py."
+            )
+        mapped = TICKER_MAP[ticker]
+        if mapped is None:
+            raise BrokerError(
+                f"Ticker '{ticker}' is not tradeable on Avanza. "
+                f"It is available for paper trading only via yfinance."
+            )
+        return mapped

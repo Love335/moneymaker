@@ -178,8 +178,8 @@ class LEDManager:
         time.sleep(STATE_HOLD_SECONDS)
         with self._lock:
             self._hold_active = False
-            self._persistent_state = LEDState.IDLE_PAPER
-        self._apply_persistent(LEDState.IDLE_PAPER)
+            restore = self._persistent_state
+        self._apply_persistent(restore)
 
     def _passive_pulse_loop(self) -> None:
         """Emit a brief dim pulse on a long interval for passive mode indication."""
