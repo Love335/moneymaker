@@ -9,6 +9,7 @@ graceful shutdown.
 import logging
 import time
 import threading
+import signal
 from typing import Dict, Optional
 
 from algorithms.base import BaseAlgorithm, MarketSnapshot, TradeAction
@@ -89,8 +90,22 @@ class Engine:
         self._power:       Optional[PowerManager]       = None
         self._menu:        Optional[MenuManager]        = None
 
+        self._setup_os_signal_handlers()
+
         # Subscribe to events
         self._subscribe_all()
+
+    def _setup_os_signal_handlers(self) -> None:
+            """Register hooks to catch systemd/OS shutdown signals."""
+            signal.signal(signal.SIGTERM, self._handle_os_signal)
+            signal.signal(signal.SIGINT, self._handle_os_signal)
+            # Catch the signal sent when SSH connection terminates
+            signal.signal(signal.SIGHUP, self._handle_os_signal)
+
+    def _handle_os_signal(self, signum, frame) -> None:
+        """Callback when Linux tells this process to stop."""
+        logger.info("OS signal %d received. Intercepting for clean hardware termination.", signum)
+        self._shutdown_event.set()
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -163,16 +178,18 @@ class Engine:
             try:
                 snap = self._state.snapshot()
 
-                if snap.system_status == SystemStatus.SUSPENDED:
-                    time.sleep(1)
-                    continue
-
-                now = time.monotonic() # Get current time once per tick
-
                 # ── Shutdown check ────────────────────────────
                 if self._shutdown_event.is_set():
                     self._perform_shutdown()
                     break
+
+                if snap.system_status == SystemStatus.SUSPENDED:
+                    # Instantly wakes up if shutdown happens during suspension
+                    if self._shutdown_event.wait(timeout=1):
+                        continue
+                    continue
+
+                now = time.monotonic() # Get current time once per tick
 
                 # ── Awaiting recovery confirmation ────────────
                 if snap.system_status == SystemStatus.AWAITING_RECOVERY:
@@ -194,7 +211,9 @@ class Engine:
                 # ── Market closed ─────────────────────────────
                 if not snap.market_is_open:
                     self._state.set_status(SystemStatus.MARKET_CLOSED)
-                    time.sleep(MARKET_CLOSED_SLEEP)
+                    # Wakes up immediately on shutdown instead of waiting 60s
+                    if self._shutdown_event.wait(timeout=MARKET_CLOSED_SLEEP):
+                        continue
                     continue
 
                 # ── Algorithm evaluation ──────────────────────
@@ -206,7 +225,9 @@ class Engine:
                     self._run_evaluation()
                     last_evaluation = now
 
-                time.sleep(1)
+                # Standard 1-second interval tick (unblocking)
+                if self._shutdown_event.wait(timeout=1):
+                    continue
 
             except Exception as exc:
                 self._handle_crash(exc)
@@ -374,6 +395,50 @@ class Engine:
             self._display.show_message("EXEC ERR")
             self._led.set_state(LEDState.ERROR)
 
+    def _perform_shutdown(self) -> None:
+        """
+        Gracefully close down all subsystems and clear hardware displays
+        before the OS cuts power.
+        """
+        logger.info("Performing graceful hardware and subsystem shutdown...")
+        self._running = False
+
+        # 1. Stop background processing tasks safely
+        if self._scheduler:
+            try: self._scheduler.stop()
+            except Exception as e: logger.error("Error stopping scheduler: %s", e)
+        if self._buttons:
+            try: self._buttons.stop()
+            except Exception as e: logger.error("Error stopping buttons: %s", e)
+        if self._power:
+            try: self._power.stop()
+            except Exception as e: logger.error("Error stopping power manager: %s", e)
+
+        # 2. Kill the active LED configurations (triggers COLOUR_OFF internally)
+        if self._led:
+            try:
+                self._led.stop()
+                logger.info("LEDManager cleared successfully.")
+            except Exception as e:
+                logger.error("Error clearing LEDs during shutdown: %s", e)
+
+        # 3. Clean up the MAX7219 Matrix/Segment Display
+        if self._display:
+            try:
+                self._display.stop_flashing()
+                # Pass a blank string of spaces to clear all active text/segments
+                self._display.show_message("        ") 
+                
+                # Call an internal display stop/clear method if your DisplayManager defines one
+                if hasattr(self._display, 'stop'):
+                    self._display.stop()
+                    
+                logger.info("DisplayManager cleared successfully.")
+            except Exception as e:
+                logger.error("Error clearing display during shutdown: %s", e)
+
+        logger.info("Graceful shutdown sequence complete.")
+
     # ── Event handlers ────────────────────────────────────────
 
     def _subscribe_all(self) -> None:
@@ -421,14 +486,23 @@ class Engine:
             snap = self._state.snapshot()
             self._broker = PaperBroker(snap.paper_balance or 10_000.0)
         else:
-            # Real broker requires credentials — handled externally
-            # For safety, switching to REAL without a real broker
-            # leaves the paper broker in place and logs a warning
-            logger.warning(
-                "Switched to REAL mode but no real broker configured. "
-                "Remaining on paper broker for safety."
-            )
-            self._display.show_message("NO REAL BROKER")
+            try:
+                from trading.avanza_broker import AvanzaBroker
+                from security.secrets import load_avanza_credentials
+                creds = load_avanza_credentials()
+                self._broker = AvanzaBroker(
+                    username=creds.username,
+                    password=creds.password,
+                    totp_secret=creds.totp_secret,
+                    account_id="3525815",
+                )
+                self._display.show_message("REAL OK ")
+                logger.info("Switched to real Avanza broker")
+            except Exception as exc:
+                logger.error("Failed to init real broker: %s", exc)
+                self._display.show_message("AUTH ERR")
+                self._state.switch_trading_mode()  # revert to paper
+                self._display.set_mode_char("P")
 
     def _on_algorithm_switched(self, event: Event) -> None:
         new_algo = self._state.next_algorithm()
