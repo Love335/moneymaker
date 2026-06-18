@@ -13,40 +13,31 @@ Risk dial effect:
 import logging
 from typing import List
 
-from algorithms.base import (
-    BaseAlgorithm,
-    MarketSnapshot,
-    TradeSignal,
-    TradeAction,
-)
+from algorithms.base import BaseAlgorithm, MarketSnapshot, TradeSignal, TradeAction
+from trading.tickers import REGISTRY, AssetClass
 
 logger = logging.getLogger(__name__)
 
-# Large-cap Swedish stocks with sufficient liquidity for mean reversion
-UNIVERSE = [
-    "ERIC-B.ST",    # Ericsson B
-    "VOLV-B.ST",    # Volvo B
-    "SEB-A.ST",     # SEB A
-    "INVE-B.ST",    # Investor B
-    "SAND.ST",      # Sandvik
-    "ATCO-A.ST",    # Atlas Copco A
-    "SWED-A.ST",    # Swedbank A
-    "HM-B.ST",      # H&M B
+# Pull Swedish large-cap equities from the central registry.
+# Only individual stocks — not ETFs — are appropriate for mean reversion.
+UNIVERSE: list[str] = [
+    t for t, i in REGISTRY.items()
+    if i.asset_class == AssetClass.EQUITY
 ]
 
-# Minimum history needed to compute RSI
-RSI_PERIOD     = 2
-MIN_HISTORY    = RSI_PERIOD + 10   # buffer for stability
+# RSI parameters
+RSI_PERIOD  = 2
+MIN_HISTORY = RSI_PERIOD + 10
 
-# Maximum days to hold a mean-reversion position
-MAX_HOLD_DAYS  = 5
+# Maximum trading days to hold a position before forced exit
+MAX_HOLD_DAYS = 5
 
 
 class MeanReversionAlgorithm(BaseAlgorithm):
 
     def __init__(self) -> None:
         super().__init__()
-        self._holding_days: dict[str, int] = {}  # ticker → days held
+        self._holding_days: dict[str, int] = {}
 
     @property
     def name(self) -> str:
@@ -65,7 +56,7 @@ class MeanReversionAlgorithm(BaseAlgorithm):
 
     @property
     def evaluation_interval_seconds(self) -> int:
-        return 3_600   # evaluate hourly during market hours
+        return 3_600   # hourly during market hours
 
     def risk_description(self, risk_level: float) -> str:
         entry = self._entry_threshold(risk_level)
@@ -78,7 +69,6 @@ class MeanReversionAlgorithm(BaseAlgorithm):
 
     def evaluate(self, snapshot: MarketSnapshot) -> List[TradeSignal]:
         signals: List[TradeSignal] = []
-
         try:
             entry_threshold = self._entry_threshold(snapshot.risk_level)
             exit_threshold  = self._exit_threshold(snapshot.risk_level)
@@ -105,20 +95,18 @@ class MeanReversionAlgorithm(BaseAlgorithm):
                     )
                     continue
 
-                # ── Exit condition ────────────────────────────
+                # ── Exit ─────────────────────────────────────
                 if ticker in self._holding_days:
                     self._holding_days[ticker] += 1
                     days_held = self._holding_days[ticker]
 
                     if rsi > exit_threshold or days_held >= MAX_HOLD_DAYS:
                         reason = (
-                            f"RSI {rsi:.1f} > {exit_threshold} (exit)"
+                            f"RSI {rsi:.1f} > {exit_threshold:.0f}"
                             if rsi > exit_threshold
-                            else f"Max hold period {MAX_HOLD_DAYS}d reached"
+                            else f"Max hold {MAX_HOLD_DAYS}d reached"
                         )
-                        logger.info(
-                            "MeanReversion: SELL %s | %s", ticker, reason
-                        )
+                        logger.info("MeanReversion: SELL %s — %s", ticker, reason)
                         signals.append(TradeSignal(
                             ticker=ticker,
                             action=TradeAction.SELL,
@@ -129,18 +117,18 @@ class MeanReversionAlgorithm(BaseAlgorithm):
                         ))
                         del self._holding_days[ticker]
 
-                # ── Entry condition ───────────────────────────
+                # ── Entry ─────────────────────────────────────
                 elif rsi < entry_threshold:
                     logger.info(
-                        "MeanReversion: BUY %s | RSI %.1f < %.1f",
-                        ticker, rsi, entry_threshold
+                        "MeanReversion: BUY %s — RSI %.1f < %.0f",
+                        ticker, rsi, entry_threshold,
                     )
                     signals.append(TradeSignal(
                         ticker=ticker,
                         action=TradeAction.BUY,
                         fraction=size_fraction,
                         confidence=1.0 - (rsi / entry_threshold),
-                        reason=f"RSI {rsi:.1f} < {entry_threshold} (oversold)",
+                        reason=f"RSI {rsi:.1f} < {entry_threshold:.0f} (oversold)",
                         algorithm=self.name,
                     ))
                     self._holding_days[ticker] = 0
@@ -152,22 +140,18 @@ class MeanReversionAlgorithm(BaseAlgorithm):
         return signals
 
     def on_market_closed(self) -> None:
-        """Increment hold counters at end of each trading day."""
         logger.debug(
             "MeanReversion: market closed. Active positions: %s",
-            list(self._holding_days.keys())
+            list(self._holding_days.keys()),
         )
 
-    # ── Internal helpers ──────────────────────────────────────
+    # ── Internal ──────────────────────────────────────────────
 
     def _compute_rsi(self, prices: list, period: int) -> float | None:
-        """Compute RSI for the given period using closing prices."""
         if len(prices) < period + 1:
             return None
-
-        closes = prices[-(period + 5):]   # use recent window
+        closes = prices[-(period + 5):]
         gains, losses = [], []
-
         for i in range(1, len(closes)):
             change = closes[i] - closes[i - 1]
             if change > 0:
@@ -176,21 +160,15 @@ class MeanReversionAlgorithm(BaseAlgorithm):
             else:
                 gains.append(0.0)
                 losses.append(abs(change))
-
         avg_gain = sum(gains[-period:]) / period
         avg_loss = sum(losses[-period:]) / period
-
         if avg_loss == 0:
             return 100.0
-
         rs  = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return round(rsi, 2)
+        return round(100 - (100 / (1 + rs)), 2)
 
     def _entry_threshold(self, risk_level: float) -> float:
-        """Low risk → RSI 10, high risk → RSI 25."""
         return 10.0 + 15.0 * risk_level
 
     def _exit_threshold(self, risk_level: float) -> float:
-        """Low risk → RSI 65, high risk → RSI 75."""
         return 65.0 + 10.0 * risk_level

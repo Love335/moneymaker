@@ -32,6 +32,7 @@ from trading.broker import (
     OrderStatus,
     Position,
 )
+from trading import tickers as ticker_registry
 
 logger = logging.getLogger(__name__)
 
@@ -54,24 +55,25 @@ RETRY_DELAY_SECONDS = 10
 # Avanza sessions expire after ~30 minutes of inactivity
 SESSION_REFRESH_INTERVAL = 1500   # 25 minutes
 
-# Maps Yahoo Finance tickers → Avanza orderbook IDs
-# Find orderbook IDs from the URL when viewing a stock on avanza.se
-# e.g. avanza.se/aktier/om-aktien.html/5479/ericsson-b → ID is 5479
-TICKER_MAP: dict[str, str] = {
-    "XACT-OMXS30.ST":    "94",      # XACT OMXS30
-    "XACT-BULL.ST":      "96",      # XACT Bull
-    "XACT-OBLIGATION.ST": "98",     # XACT Obligation
-    "ERIC-B.ST":         "5479",    # Ericsson B
-    "VOLV-B.ST":         "3",       # Volvo B
-    "SEB-A.ST":          "1116",    # SEB A
-    "INVE-B.ST":         "36",      # Investor B
-    "SAND.ST":           "1298",    # Sandvik
-    "ATCO-A.ST":         "16",      # Atlas Copco A
-    "SWED-A.ST":         "1690",    # Swedbank A
-    "HM-B.ST":           "1286",    # H&M B
-    "SPY":               None,      # Not available on Avanza
-    "GLD":               None,      # Not available on Avanza
-}
+
+def _extract_value(field) -> float:
+    """
+    Safely extract a numeric value from an Avanza API field.
+
+    The API returns monetary values as dicts:
+      {"value": 40013.28, "unit": "SEK", ...}
+    or occasionally as plain floats/ints.
+    Returns 0.0 if the field is None or unparseable.
+    """
+    if field is None:
+        return 0.0
+    if isinstance(field, dict):
+        return float(field.get("value", 0.0))
+    try:
+        return float(field)
+    except (TypeError, ValueError):
+        return 0.0
+
 
 class AvanzaBroker(BaseBroker):
     """
@@ -114,46 +116,39 @@ class AvanzaBroker(BaseBroker):
         """
         Fetch current account state from Avanza.
         Raises BrokerError if the request fails.
+
+        API field notes (confirmed from live response):
+          account["id"]          — account ID string
+          account["type"]        — account type e.g. "INVESTERINGSSPARKONTO"
+          account["buyingPower"] — dict {"value": float, "unit": "SEK", ...}
+          account["totalValue"]  — dict {"value": float, ...}
         """
         with self._lock:
             self._ensure_connected()
             try:
-                overview  = self._client.get_overview()
-                positions = self._client.get_positions()
+                overview = self._client.get_overview()
 
-                # Find our ISK account
+                # Find our ISK account by "id" (not "accountId")
                 account = next(
                     (a for a in overview.get("accounts", [])
-                     if str(a.get("accountId")) == self._account_id),
+                     if str(a.get("id")) == self._account_id),
                     None
                 )
                 if account is None:
+                    available = [
+                        f"{a.get('id')} ({a.get('type')})"
+                        for a in overview.get("accounts", [])
+                    ]
                     raise BrokerError(
-                        f"Account {self._account_id} not found in overview. "
-                        f"Available: {[a.get('accountId') for a in overview.get('accounts', [])]}"
+                        f"Account {self._account_id} not found. "
+                        f"Available: {available}"
                     )
 
-                liquid_sek = float(account.get("buyingPower", 0))
-                total_sek  = float(account.get("totalValue", 0))
+                liquid_sek = _extract_value(account.get("buyingPower"))
+                total_sek  = _extract_value(account.get("totalValue"))
 
-                # Parse positions for our account
-                held_positions = []
-                for pos_group in positions.get("instrumentPositions", []):
-                    for pos in pos_group.get("positions", []):
-                        if str(pos.get("accountId")) != self._account_id:
-                            continue
-                        try:
-                            held_positions.append(Position(
-                                ticker=str(pos.get("orderbookId", "")),
-                                quantity=float(pos.get("volume", 0)),
-                                average_price=float(pos.get("averageAcquiredPrice", 0)),
-                                current_price=float(pos.get("lastPrice", 0)),
-                            ))
-                        except (TypeError, ValueError) as exc:
-                            logger.warning(
-                                "AvanzaBroker: could not parse position %s: %s",
-                                pos, exc
-                            )
+                # Fetch positions separately
+                held_positions = self._fetch_positions()
 
                 return AccountOverview(
                     liquid_sek=liquid_sek,
@@ -170,22 +165,98 @@ class AvanzaBroker(BaseBroker):
                     f"Failed to fetch account overview: {exc}"
                 ) from exc
 
+    def _fetch_positions(self) -> list:
+        """
+        Fetch current positions for our account.
+        Returns an empty list if the API call fails or no positions exist.
+        The avanza-api library uses get_positions() on newer versions
+        and get_positions_by_account() on others — we try both.
+        """
+        held_positions = []
+        try:
+            # Try the account-specific endpoint first
+            try:
+                raw = self._client.get_positions()
+            except AttributeError:
+                logger.warning(
+                    "AvanzaBroker: get_positions() not available — "
+                    "positions will be empty"
+                )
+                return []
+
+            # The response structure varies by library version.
+            # Handle both list and dict responses.
+            if isinstance(raw, list):
+                position_list = raw
+            elif isinstance(raw, dict):
+                # Flatten instrumentPositions groups
+                position_list = []
+                for group in raw.get("instrumentPositions", []):
+                    position_list.extend(group.get("positions", []))
+            else:
+                logger.warning(
+                    "AvanzaBroker: unexpected positions response type: %s",
+                    type(raw)
+                )
+                return []
+
+            for pos in position_list:
+                # Filter to our account only if accountId is present
+                if "accountId" in pos:
+                    if str(pos["accountId"]) != self._account_id:
+                        continue
+
+                try:
+                    held_positions.append(Position(
+                        ticker=str(pos.get("orderbookId", "")),
+                        quantity=float(pos.get("volume", 0)),
+                        average_price=_extract_value(
+                            pos.get("averageAcquiredPrice")
+                        ),
+                        current_price=_extract_value(
+                            pos.get("lastPrice") or pos.get("currentPrice")
+                        ),
+                    ))
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "AvanzaBroker: could not parse position %s: %s",
+                        pos, exc
+                    )
+
+        except Exception as exc:
+            logger.error("AvanzaBroker: failed to fetch positions: %s", exc)
+
+        return held_positions
+
     def get_price(self, ticker: str) -> float:
         """
-        Return the current price for a ticker (orderbook ID) in SEK.
-        Raises BrokerError if unavailable.
+        Return the current price for a Yahoo Finance ticker in SEK.
+        Translates to Avanza orderbook ID via the ticker registry.
+        Raises BrokerError if unavailable or not on Avanza.
         """
         orderbook_id = self._to_orderbook_id(ticker)
         with self._lock:
             self._ensure_connected()
             try:
-                data  = self._client.get_stock_info(orderbook_id)
-                price = data.get("lastPrice") or data.get("buyPrice")
-                if price is None:
+                data = self._client.get_stock_info(orderbook_id)
+
+                # Try multiple field names — the API varies by instrument type
+                price = None
+                for field in ("lastPrice", "buyPrice", "currentPrice", "closingPrice"):
+                    raw = data.get(field)
+                    if raw is not None:
+                        price = _extract_value(raw) if isinstance(raw, dict) else float(raw)
+                        if price > 0:
+                            break
+
+                if price is None or price <= 0:
                     raise BrokerError(
-                        f"No price available for orderbook {ticker}"
+                        f"No valid price in response for {ticker} "
+                        f"(orderbook {orderbook_id}). "
+                        f"Fields present: {list(data.keys())}"
                     )
-                return float(price)
+                return price
+
             except BrokerError:
                 raise
             except Exception as exc:
@@ -200,13 +271,14 @@ class AvanzaBroker(BaseBroker):
         amount_sek: float,
     ) -> OrderResult:
         """
-        Place a market-price order on the ISK account.
+        Place a limit order at current price on the ISK account.
 
-        ticker:     Avanza orderbook ID (e.g. "5479" for Ericsson B)
+        ticker:     Yahoo Finance ticker (translated to orderbook ID internally)
         action:     "BUY" or "SELL"
         amount_sek: amount in SEK to spend (BUY) or target proceeds (SELL)
         """
         orderbook_id = self._to_orderbook_id(ticker)
+
         with self._lock:
             self._ensure_connected()
 
@@ -224,9 +296,7 @@ class AvanzaBroker(BaseBroker):
             try:
                 price = self.get_price(ticker)
                 if price <= 0:
-                    raise BrokerError(
-                        f"Invalid price {price} for {ticker}"
-                    )
+                    raise BrokerError(f"Invalid price {price} for {ticker}")
 
                 quantity = round(amount_sek / price, 4)
                 if quantity <= 0:
@@ -240,15 +310,15 @@ class AvanzaBroker(BaseBroker):
                         error_message="Calculated quantity is zero",
                     )
 
-                order_type = (
-                    OrderType.BUY if action == "BUY" else OrderType.SELL
-                )
+                order_type  = OrderType.BUY if action == "BUY" else OrderType.SELL
                 valid_until = date.today() + timedelta(days=ORDER_VALID_DAYS)
 
                 logger.info(
-                    "AvanzaBroker: placing %s order — "
-                    "orderbook=%s qty=%.4f price=%.2f SEK total=%.2f SEK",
-                    action, ticker, quantity, price, quantity * price
+                    "AvanzaBroker: placing %s — "
+                    "ticker=%s orderbook=%s qty=%.4f "
+                    "price=%.2f total=%.2f SEK",
+                    action, ticker, orderbook_id,
+                    quantity, price, quantity * price,
                 )
 
                 result = self._client.place_order(
@@ -262,8 +332,7 @@ class AvanzaBroker(BaseBroker):
 
                 order_id = str(result.get("orderId", ""))
                 logger.info(
-                    "AvanzaBroker: order placed successfully — id=%s",
-                    order_id
+                    "AvanzaBroker: order placed — id=%s", order_id
                 )
 
                 return OrderResult(
@@ -305,7 +374,7 @@ class AvanzaBroker(BaseBroker):
                 return True
 
             try:
-                deals = self._client.get_deals_and_orders()
+                deals  = self._client.get_deals_and_orders()
                 orders = deals.get("orders", [])
 
                 account_orders = [
@@ -320,7 +389,6 @@ class AvanzaBroker(BaseBroker):
                 all_cancelled = True
                 for order in account_orders:
                     order_id   = order.get("orderId")
-                    book_id    = order.get("orderbook", {}).get("id")
                     account_id = order.get("account", {}).get("id")
                     try:
                         self._client.delete_order(
@@ -333,7 +401,7 @@ class AvanzaBroker(BaseBroker):
                     except Exception as exc:
                         logger.error(
                             "AvanzaBroker: failed to cancel order %s: %s",
-                            order_id, exc
+                            order_id, exc,
                         )
                         all_cancelled = False
 
@@ -357,7 +425,7 @@ class AvanzaBroker(BaseBroker):
             try:
                 logger.info(
                     "AvanzaBroker: connecting (attempt %d/%d)",
-                    attempt, MAX_CONNECTION_RETRIES
+                    attempt, MAX_CONNECTION_RETRIES,
                 )
                 self._client = Avanza({
                     "username":   self._username,
@@ -367,49 +435,42 @@ class AvanzaBroker(BaseBroker):
                 self._connected = True
                 self._last_auth = time.monotonic()
                 logger.info(
-                    "AvanzaBroker: connected successfully to account %s",
-                    self._account_id
+                    "AvanzaBroker: connected to account %s",
+                    self._account_id,
                 )
                 return
 
             except Exception as exc:
                 logger.warning(
-                    "AvanzaBroker: connection attempt %d failed: %s",
-                    attempt, exc
+                    "AvanzaBroker: attempt %d failed: %s", attempt, exc
                 )
                 if attempt < MAX_CONNECTION_RETRIES:
                     time.sleep(RETRY_DELAY_SECONDS)
 
         self._connected = False
         raise BrokerError(
-            f"Failed to connect to Avanza after {MAX_CONNECTION_RETRIES} attempts"
+            f"Failed to connect to Avanza after "
+            f"{MAX_CONNECTION_RETRIES} attempts"
         )
 
     def _ensure_connected(self) -> None:
         """
-        Verify connection is active. Reconnect if session has expired.
+        Reconnect if the session has expired.
         Must be called within self._lock.
         """
         age = time.monotonic() - self._last_auth
         if not self._connected or age > SESSION_REFRESH_INTERVAL:
-            logger.info(
-                "AvanzaBroker: session expired or disconnected — reconnecting"
-            )
+            logger.info("AvanzaBroker: reconnecting (session age %.0fs)", age)
             self._connect()
 
     def _session_refresh_loop(self) -> None:
-        """
-        Background thread that proactively refreshes the session
-        before it expires, to avoid mid-trade authentication failures.
-        """
+        """Proactively refresh the session before it expires."""
         while True:
-            time.sleep(SESSION_REFRESH_INTERVAL - 60)   # refresh 1 min early
+            time.sleep(SESSION_REFRESH_INTERVAL - 60)
             with self._lock:
                 if self._connected:
                     try:
-                        logger.info(
-                            "AvanzaBroker: proactive session refresh"
-                        )
+                        logger.info("AvanzaBroker: proactive session refresh")
                         self._connect()
                     except Exception as exc:
                         logger.error(
@@ -417,16 +478,18 @@ class AvanzaBroker(BaseBroker):
                         )
                         self._connected = False
 
-    def _to_orderbook_id(self, ticker: str) -> str:
-        if ticker not in TICKER_MAP:
+    def _to_orderbook_id(self, yf_ticker: str) -> str:
+        """
+        Translate a Yahoo Finance ticker to an Avanza orderbook ID
+        via the central ticker registry.
+        Raises BrokerError if not found or not tradeable on Avanza.
+        """
+        try:
+            return ticker_registry.avanza_id(yf_ticker)
+        except KeyError:
             raise BrokerError(
-                f"Ticker '{ticker}' has no Avanza orderbook ID mapping. "
-                f"Add it to TICKER_MAP in avanza_broker.py."
+                f"Ticker '{yf_ticker}' is not in the instrument registry. "
+                f"Add it to src/trading/tickers.py."
             )
-        mapped = TICKER_MAP[ticker]
-        if mapped is None:
-            raise BrokerError(
-                f"Ticker '{ticker}' is not tradeable on Avanza. "
-                f"It is available for paper trading only via yfinance."
-            )
-        return mapped
+        except ValueError as exc:
+            raise BrokerError(str(exc))
