@@ -204,12 +204,3 @@ class DisplayManager:
         # Right-align within 8 characters
         formatted = text[:8].rjust(8)
         self._write_raw(formatted)
-
-    def _write_raw(self, text: str) -> None:
-        """Write exactly 8 characters to the display."""
-        if self._seg is None:
-            return
-        try:
-            self._seg.text = text[:8]
-        except Exception as exc:
-            logger.error("DisplayManager: write error: %s", exc)
