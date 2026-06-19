@@ -24,7 +24,7 @@ from core.state import (
 )
 from data.market_data import MarketDataService, MarketDataError
 from hardware.display import DisplayManager
-from hardware.led import LEDManager, LEDState
+from hardware.led import LEDManager
 from hardware.buttons import ButtonManager
 from hardware.power import PowerManager
 from applogging.logger import classify_crash, log_trade, setup_trade_logger
@@ -79,7 +79,7 @@ class Engine:
         self._consecutive_recoveries = 0
         self._lock         = threading.Lock()
         self._last_heartbeat: float = time.monotonic()
-        self._heartbeat_interval: int = 300 
+        self._heartbeat_interval: int = 300
 
         # Subsystems initialised in start()
         self._broker:      Optional[BaseBroker]        = None
@@ -91,26 +91,27 @@ class Engine:
         self._menu:        Optional[MenuManager]        = None
 
         self._setup_os_signal_handlers()
-
-        # Subscribe to events
         self._subscribe_all()
 
     def _setup_os_signal_handlers(self) -> None:
-            """Register hooks to catch systemd/OS shutdown signals."""
-            signal.signal(signal.SIGTERM, self._handle_os_signal)
-            signal.signal(signal.SIGINT, self._handle_os_signal)
+        """Register hooks to catch systemd/OS shutdown signals."""
+        signal.signal(signal.SIGTERM, self._handle_os_signal)
+        signal.signal(signal.SIGINT,  self._handle_os_signal)
 
     def _handle_os_signal(self, signum, frame) -> None:
         """Callback when Linux tells this process to stop."""
-        logger.info("OS signal %d received. Intercepting for clean hardware termination.", signum)
+        logger.info(
+            "OS signal %d received. Intercepting for clean hardware termination.",
+            signum
+        )
         self._shutdown_event.set()
 
     # ── Lifecycle ─────────────────────────────────────────────
 
     def start(
         self,
-        broker:         BaseBroker,
-        starting_algo:  str = "dual_momentum",
+        broker:        BaseBroker,
+        starting_algo: str = "dual_momentum",
     ) -> None:
         """
         Initialise all subsystems and enter the main loop.
@@ -118,26 +119,29 @@ class Engine:
         """
         logger.info("Engine starting")
         self._display.show_message("STARTING")
-        self._led.set_state(LEDState.WORKING)
 
         try:
-            self._broker       = broker
-            self._market_data  = MarketDataService(self._bus)
-            self._scheduler    = MarketScheduler(self._bus)
-            self._buttons      = ButtonManager(self._bus)
-            self._power        = PowerManager(self._bus)
-            self._menu         = MenuManager(
+            self._broker      = broker
+            self._market_data = MarketDataService(self._bus)
+            self._scheduler   = MarketScheduler(self._bus)
+            self._buttons     = ButtonManager(self._bus)
+            self._power       = PowerManager(self._bus)
+            self._menu        = MenuManager(
                 self._bus, self._state, self._display, self._led
             )
 
-            import config 
+            import config
 
-            # Load starting algorithm
+            # Wire LED to display — LED colour now derives from display content
+            self._display.set_led_callback(self._led.on_display_update)
+
+            # Set initial mode so idle pulse colour is correct
+            self._led.set_mode(paper=True)
+
             self._load_algorithm(starting_algo)
             self._state.set_risk_level(config.RISK_LEVEL)
             logger.info("Risk level set to %.2f from config", config.RISK_LEVEL)
 
-            # Start all hardware and subsystems
             self._buttons.start()
             self._power.start()
             self._scheduler.start()
@@ -145,23 +149,18 @@ class Engine:
             self._state.set_status(SystemStatus.RUNNING)
             self._display.show_message("READY")
 
-            # Set idle LED based on trading mode
-            self._update_idle_led()
-
             logger.info("Engine startup complete")
             self._bus.publish(Event(
                 type=EventType.STARTUP_COMPLETE,
                 source="Engine"
             ))
 
-            # Enter main loop
             self._main_loop()
 
         except Exception as exc:
             reason, recoverable = classify_crash(exc)
             logger.critical("Engine failed to start: %s", reason)
-            self._display.flash_message("ERR START")
-            self._led.set_state(LEDState.ERROR)
+            self._display.show_message("ERR START")
             raise
 
     def _main_loop(self) -> None:
@@ -181,7 +180,7 @@ class Engine:
                     self._perform_shutdown()
                     break
 
-                now = time.monotonic() # Get current time once per tick
+                now = time.monotonic()
 
                 # ── Awaiting recovery confirmation ────────────
                 if snap.system_status == SystemStatus.AWAITING_RECOVERY:
@@ -192,32 +191,32 @@ class Engine:
                         self._state.clear_crash()
                         self._state.set_status(SystemStatus.RUNNING)
                         self._display.show_message("RESUMED")
-                        self._last_heartbeat = time.monotonic() # Reset heartbeat after recovery
+                        self._last_heartbeat = time.monotonic()
                     continue
 
                 # ── Heartbeat ─────────────────────────────────
-                if snap.system_status == SystemStatus.RUNNING and (now - self._last_heartbeat) >= self._heartbeat_interval:
+                if snap.system_status == SystemStatus.RUNNING and (
+                    now - self._last_heartbeat
+                ) >= self._heartbeat_interval:
                     logger.info("Heartbeat: Engine is healthy and running")
                     self._last_heartbeat = now
 
                 # ── Market closed ─────────────────────────────
                 if not snap.market_is_open:
                     self._state.set_status(SystemStatus.MARKET_CLOSED)
-                    # Wakes up immediately on shutdown instead of waiting 60s
                     if self._shutdown_event.wait(timeout=MARKET_CLOSED_SLEEP):
                         continue
                     continue
 
                 # ── Algorithm evaluation ──────────────────────
                 self._state.set_status(SystemStatus.RUNNING)
-                algo = self._algorithm
+                algo     = self._algorithm
                 interval = algo.evaluation_interval_seconds if algo else 3600
 
                 if now - last_evaluation >= interval:
                     self._run_evaluation()
                     last_evaluation = now
 
-                # Standard 1-second interval tick (unblocking)
                 if self._shutdown_event.wait(timeout=1):
                     continue
 
@@ -236,23 +235,16 @@ class Engine:
             snap.trading_mode.value,
             snap.risk_level,
         )
-        self._led.set_state(LEDState.WORKING)
         self._display.show_message("EVALUATING")
 
         try:
-            # Verify connectivity
             if not self._broker.is_connected():
                 raise BrokerError("Broker not connected")
 
-            # Fetch account state
             overview = self._broker.get_account_overview()
-
-            # Collect all tickers the algorithm needs
-            tickers = self._get_required_tickers()
-
-            # Fetch market data
-            prices = self._market_data.get_prices_bulk(tickers)
-            history = self._market_data.get_history_bulk(tickers)
+            tickers  = self._get_required_tickers()
+            prices   = self._market_data.get_prices_bulk(tickers)
+            history  = self._market_data.get_history_bulk(tickers)
 
             for ticker, price in prices.items():
                 if hasattr(self._broker, 'update_price'):
@@ -270,22 +262,18 @@ class Engine:
                 risk_level=snap.risk_level,
             )
 
-            # Run algorithm
             signals = self._algorithm.evaluate(market_snap)
 
             if not signals:
                 logger.info("Evaluation: no trade signals generated")
                 self._display.show_message("NO SIGNAL")
-                self._update_idle_led()
                 return
 
-            # Execute signals
             for signal in signals:
                 if signal.action == TradeAction.HOLD:
                     continue
                 self._execute_signal(signal, overview.liquid_sek, snap)
 
-            # Update P&L
             updated_overview = self._broker.get_account_overview()
             pnl = self._calculate_pnl(updated_overview)
             self._state.update_pnl(pnl)
@@ -307,14 +295,12 @@ class Engine:
                 source="Engine",
                 payload={"error": str(exc)}
             ))
-        finally:
-            self._update_idle_led()
 
     def _execute_signal(
         self,
         signal,
         liquid_sek: float,
-        snap: AppState,
+        snap:       AppState,
     ) -> None:
         """Execute a single trade signal through the broker."""
         amount_sek = round(liquid_sek * signal.fraction, 2)
@@ -357,7 +343,6 @@ class Engine:
             )
 
             if success:
-                self._led.set_state(LEDState.TRADE_PROFIT)
                 self._display.show_message(
                     f"{action_str} OK {result.executed_price:.2f}"
                 )
@@ -372,8 +357,7 @@ class Engine:
                     }
                 ))
             else:
-                self._led.set_state(LEDState.TRADE_LOSS)
-                self._display.show_message(f"ORDER FAIL {signal.ticker[:4]}")
+                self._display.show_message(f"ERR {signal.ticker[:4]}")
                 self._bus.publish(Event(
                     type=EventType.TRADE_FAILED,
                     source="Engine",
@@ -385,9 +369,12 @@ class Engine:
         except BrokerError as exc:
             logger.error("Trade execution error for %s: %s", signal.ticker, exc)
             self._display.show_message("EXEC ERR")
-            self._led.set_state(LEDState.ERROR)
 
     def _perform_shutdown(self) -> None:
+        """
+        Gracefully close down all subsystems and clear hardware
+        before the OS cuts power.
+        """
         logger.info("Performing graceful hardware and subsystem shutdown...")
         self._running = False
 
@@ -402,23 +389,23 @@ class Engine:
             try: self._power.stop()
             except Exception as e: logger.error("Error stopping power manager: %s", e)
 
-        # 2. Stop the display thread first so it can't overwrite our message,
-        #    then write GOODBYE directly and hold it for the remaining shutdown time
+        # 2. Stop display thread, then write GOODBYE directly.
+        #    The LED callback fires from show_text() → LED goes off automatically
+        #    because GOODBYE maps to COLOUR_OFF in the LED colour map.
         if self._display:
             try:
                 self._display.stop_flashing()
                 if hasattr(self._display, 'stop'):
-                    self._display.stop()          # kills the display thread
-                self._display.show_text("GOODBYE")  # writes directly, no thread needed
+                    self._display.stop()
+                self._display.show_text("GOODBYE")
                 logger.info("DisplayManager: showing GOODBYE")
             except Exception as e:
                 logger.error("Error writing goodbye to display: %s", e)
 
-        # 3. Turn off LED — do this after display so both get a chance to run
+        # 3. Stop LED — hardware-level guarantee it's off even if callback
+        #    somehow didn't fire
         if self._led:
             try:
-                self._led.set_state(LEDState.OFF)
-                time.sleep(0.2)   # brief pause so the write completes
                 self._led.stop()
                 logger.info("LEDManager cleared successfully.")
             except Exception as e:
@@ -429,29 +416,27 @@ class Engine:
     # ── Event handlers ────────────────────────────────────────
 
     def _subscribe_all(self) -> None:
-        self._bus.subscribe(EventType.MARKET_OPENED,       self._on_market_opened)
-        self._bus.subscribe(EventType.MARKET_CLOSED,       self._on_market_closed)
-        self._bus.subscribe(EventType.SHUTDOWN_REQUESTED,  self._on_shutdown_requested)
-        self._bus.subscribe(EventType.MODE_SWITCHED,       self._on_mode_switched)
-        self._bus.subscribe(EventType.ALGORITHM_SWITCHED,  self._on_algorithm_switched)
+        self._bus.subscribe(EventType.MARKET_OPENED,        self._on_market_opened)
+        self._bus.subscribe(EventType.MARKET_CLOSED,        self._on_market_closed)
+        self._bus.subscribe(EventType.SHUTDOWN_REQUESTED,   self._on_shutdown_requested)
+        self._bus.subscribe(EventType.MODE_SWITCHED,        self._on_mode_switched)
+        self._bus.subscribe(EventType.ALGORITHM_SWITCHED,   self._on_algorithm_switched)
         self._bus.subscribe(EventType.PAPER_PORTFOLIO_RESET, self._on_paper_reset)
-        self._bus.subscribe(EventType.CONNECTION_LOST,     self._on_connection_lost)
-        self._bus.subscribe(EventType.API_ERROR,           self._on_api_error)
-        self._bus.subscribe(EventType.BUTTON_YES_PRESSED,  self._on_yes_for_recovery)
+        self._bus.subscribe(EventType.CONNECTION_LOST,      self._on_connection_lost)
+        self._bus.subscribe(EventType.API_ERROR,            self._on_api_error)
+        self._bus.subscribe(EventType.BUTTON_YES_PRESSED,   self._on_yes_for_recovery)
 
     def _on_market_opened(self, event: Event) -> None:
         logger.info("Market opened")
         self._state.set_market_open(True)
         self._display.show_message("MKT OPEN")
-        self._led.set_state(LEDState.WORKING)
         if self._algorithm:
             self._algorithm.on_market_opened()
 
     def _on_market_closed(self, event: Event) -> None:
         logger.info("Market closed")
         self._state.set_market_open(False)
-        self._display.show_message("MKT CLOSED")
-        self._led.set_state(LEDState.MARKET_CLOSED)
+        self._display.show_message("MKT CLOSE")
         if self._algorithm:
             self._algorithm.on_market_closed()
 
@@ -462,13 +447,15 @@ class Engine:
 
     def _on_mode_switched(self, event: Event) -> None:
         new_mode = self._state.switch_trading_mode()
-        char = "P" if new_mode == TradingMode.PAPER else "R"
+        char     = "P" if new_mode == TradingMode.PAPER else "R"
         self._display.set_mode_char(char)
         self._display.show_message(f"MODE {new_mode.value}")
-        self._update_idle_led()
+
+        # Update idle pulse colour to match new mode
+        self._led.set_mode(paper=(new_mode == TradingMode.PAPER))
+
         logger.info("Mode switched to %s", new_mode.value)
 
-        # Swap broker
         if new_mode == TradingMode.PAPER:
             snap = self._state.snapshot()
             self._broker = PaperBroker(snap.paper_balance or 10_000.0)
@@ -483,13 +470,14 @@ class Engine:
                     totp_secret=creds.totp_secret,
                     account_id="3525815",
                 )
-                self._display.show_message("REAL OK ")
+                self._display.show_message("REAL OK")
                 logger.info("Switched to real Avanza broker")
             except Exception as exc:
                 logger.error("Failed to init real broker: %s", exc)
                 self._display.show_message("AUTH ERR")
                 self._state.switch_trading_mode()  # revert to paper
                 self._display.set_mode_char("P")
+                self._led.set_mode(paper=True)
 
     def _on_algorithm_switched(self, event: Event) -> None:
         new_algo = self._state.next_algorithm()
@@ -509,14 +497,12 @@ class Engine:
     def _on_connection_lost(self, event: Event) -> None:
         logger.warning("Connection lost: %s", event.payload.get("error"))
         self._state.set_connectivity(ConnectivityStatus.DISCONNECTED)
-        self._led.set_state(LEDState.ERROR)
         self._display.show_message("NO CONNECTION")
 
     def _on_api_error(self, event: Event) -> None:
         logger.error("API error: %s", event.payload.get("error"))
         self._state.set_connectivity(ConnectivityStatus.DEGRADED)
         self._display.show_message("API ERROR")
-        self._led.set_state(LEDState.ERROR)
 
     def _on_yes_for_recovery(self, event: Event) -> None:
         logger.info("YES pressed — setting recovery confirmation")
@@ -529,7 +515,6 @@ class Engine:
         reason, recoverable = classify_crash(exc)
         logger.critical("Crash in main loop: %s", reason)
         self._state.record_crash(reason, recoverable)
-        self._led.set_state(LEDState.ERROR)
 
         if recoverable and self._consecutive_recoveries < MAX_AUTO_RECOVERIES:
             self._consecutive_recoveries += 1
@@ -552,7 +537,7 @@ class Engine:
             self._state.set_status(SystemStatus.AWAITING_RECOVERY)
             self._consecutive_recoveries = 0
 
-    # ── Helpers ──────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────
 
     def _load_algorithm(self, name: str) -> None:
         cls = ALGORITHM_REGISTRY.get(name)
@@ -583,12 +568,4 @@ class Engine:
         """Calculate all-time P&L from account overview."""
         if isinstance(self._broker, PaperBroker):
             return self._broker.get_all_time_pnl()
-        # For real broker, P&L is tracked externally via Avanza
         return sum(p.unrealised_pnl for p in overview.positions)
-
-    def _update_idle_led(self) -> None:
-        snap = self._state.snapshot()
-        if snap.trading_mode == TradingMode.PAPER:
-            self._led.set_state(LEDState.IDLE_PAPER)
-        else:
-            self._led.set_state(LEDState.IDLE_REAL)

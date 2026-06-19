@@ -15,7 +15,7 @@ from typing import Callable, List, Optional
 from core.events import EventBus, EventType, Event
 from core.state import StateManager, TradingMode
 from hardware.display import DisplayManager
-from hardware.led import LEDManager, LEDState
+from hardware.led import LEDManager
 
 logger = logging.getLogger(__name__)
 
@@ -114,23 +114,15 @@ class MenuManager:
         self._menu_open    = True
         self._option_index = 0
         self._confirming   = False
-        self._led.set_state(LEDState.MENU_OPEN)
         self._bus.publish(Event(type=EventType.MENU_OPENED, source="MenuManager"))
-        self._show_current_option()
+        self._show_current_option()  # LED follows display automatically
         logger.info("Menu opened")
 
     def _close_menu(self) -> None:
         self._menu_open  = False
         self._confirming = False
         self._bus.publish(Event(type=EventType.MENU_CLOSED, source="MenuManager"))
-        # Restore appropriate idle LED state
-        snap = self._state.snapshot()
-        idle_state = (
-            LEDState.IDLE_PAPER
-            if snap.trading_mode == TradingMode.PAPER
-            else LEDState.IDLE_REAL
-        )
-        self._led.set_state(idle_state)
+        # Displaying idle P&L will set LED to off (idle), pulse loop handles the rest
         logger.info("Menu closed")
 
     def _show_current_option(self) -> None:

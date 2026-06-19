@@ -59,6 +59,23 @@ class DisplayManager:
         self._mode_char:    str                    = "P"
         self._lock:         threading.Lock         = threading.Lock()
         self._flashing_urgent: bool                = False
+        self._led_callback  = None                 # ADD THIS
+
+    def set_led_callback(self, callback) -> None:
+        """Register a callable that receives the display text on every update."""
+        self._led_callback = callback
+
+    def _write_raw(self, text: str) -> None:
+        """Write exactly 8 characters to the display."""
+        if self._seg is None:
+            return
+        try:
+            self._seg.text = text[:8]
+            # Notify LED of every display change
+            if self._led_callback:
+                self._led_callback(text[:8])
+        except Exception as exc:
+            logger.error("DisplayManager: write error: %s", exc)
 
     def start(self) -> None:
         """Initialise hardware and start display thread."""
