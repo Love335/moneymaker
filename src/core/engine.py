@@ -388,23 +388,10 @@ class Engine:
             self._led.set_state(LEDState.ERROR)
 
     def _perform_shutdown(self) -> None:
-        """
-        Gracefully close down all subsystems and clear hardware displays
-        before the OS cuts power.
-        """
         logger.info("Performing graceful hardware and subsystem shutdown...")
         self._running = False
 
-        # Show goodbye before stopping anything
-        if self._display:
-            try:
-                self._display.stop_flashing()
-                self._display.show_message("GOODBYE")
-                time.sleep(2.5)  # let it scroll fully before we tear down
-            except Exception as e:
-                logger.error("Error showing goodbye: %s", e)
-
-        # 1. Stop background processing tasks safely
+        # 1. Stop background tasks
         if self._scheduler:
             try: self._scheduler.stop()
             except Exception as e: logger.error("Error stopping scheduler: %s", e)
@@ -415,24 +402,27 @@ class Engine:
             try: self._power.stop()
             except Exception as e: logger.error("Error stopping power manager: %s", e)
 
-        # 2. Kill the active LED configurations
+        # 2. Stop the display thread first so it can't overwrite our message,
+        #    then write GOODBYE directly and hold it for the remaining shutdown time
+        if self._display:
+            try:
+                self._display.stop_flashing()
+                if hasattr(self._display, 'stop'):
+                    self._display.stop()          # kills the display thread
+                self._display.show_text("GOODBYE")  # writes directly, no thread needed
+                logger.info("DisplayManager: showing GOODBYE")
+            except Exception as e:
+                logger.error("Error writing goodbye to display: %s", e)
+
+        # 3. Turn off LED — do this after display so both get a chance to run
         if self._led:
             try:
+                self._led.set_state(LEDState.OFF)
+                time.sleep(0.2)   # brief pause so the write completes
                 self._led.stop()
                 logger.info("LEDManager cleared successfully.")
             except Exception as e:
                 logger.error("Error clearing LEDs during shutdown: %s", e)
-
-        # 3. Clean up the display
-        if self._display:
-            try:
-                self._display.stop_flashing()
-                self._display.show_message("        ")
-                if hasattr(self._display, 'stop'):
-                    self._display.stop()
-                logger.info("DisplayManager cleared successfully.")
-            except Exception as e:
-                logger.error("Error clearing display during shutdown: %s", e)
 
         logger.info("Graceful shutdown sequence complete.")
 

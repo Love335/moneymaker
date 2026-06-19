@@ -94,10 +94,8 @@ class DisplayManager:
         self._queue.put(DisplayMessage(text=text, priority=priority))
 
     def show_text(self, text: str) -> None:
-        self._queue.put(DisplayMessage(
-            text=text[:8].upper().ljust(8),
-            static=True,
-        ))
+        """Write a static message directly to hardware, bypassing the queue."""
+        self._write_raw(text[:8].upper().ljust(8))
 
     def flash_message(self, text: str) -> None:
         """Queue a message to flash (not scroll) — for urgent alerts."""
