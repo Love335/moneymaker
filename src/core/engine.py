@@ -135,9 +135,6 @@ class Engine:
             # Wire LED to display — LED colour now derives from display content
             self._display.set_led_callback(self._led.on_display_update)
 
-            # Set initial mode so idle pulse colour is correct
-            self._led.set_mode(paper=True)
-
             self._load_algorithm(starting_algo)
             self._state.set_risk_level(config.RISK_LEVEL)
             logger.info("Risk level set to %.2f from config", config.RISK_LEVEL)
@@ -451,9 +448,6 @@ class Engine:
         self._display.set_mode_char(char)
         self._display.show_message(f"MODE {new_mode.value}")
 
-        # Update idle pulse colour to match new mode
-        self._led.set_mode(paper=(new_mode == TradingMode.PAPER))
-
         logger.info("Mode switched to %s", new_mode.value)
 
         if new_mode == TradingMode.PAPER:
@@ -477,7 +471,6 @@ class Engine:
                 self._display.show_message("AUTH ERR")
                 self._state.switch_trading_mode()  # revert to paper
                 self._display.set_mode_char("P")
-                self._led.set_mode(paper=True)
 
     def _on_algorithm_switched(self, event: Event) -> None:
         new_algo = self._state.next_algorithm()

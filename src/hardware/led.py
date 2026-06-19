@@ -4,10 +4,6 @@ led.py — WS2812D RGB LED manager, display-driven.
 The LED colour is derived entirely from what is shown on the display.
 Register this manager as a display callback via DisplayManager.set_led_callback().
 The LED always matches what the user sees — no independent state machine.
-
-Passive idle pulse (every 5 minutes) indicates paper vs real mode
-since the display shows P&L in idle state and the mode char alone
-is not visually distinct enough at a glance.
 """
 
 import logging
@@ -31,72 +27,64 @@ COLOUR_PINK   = (0,   100, 50)
 # Tuples of (match_string, is_prefix, colour)
 DISPLAY_COLOUR_MAP = [
     # Exact matches
-    ("GOODBYE",   False, COLOUR_OFF),
-    ("READY",     False, COLOUR_GREEN),
-    ("STARTING",  False, COLOUR_YELLOW),
-    ("MKT OPEN",  False, COLOUR_GREEN),
-    ("MKT CLOSE", False, COLOUR_OFF),
-    ("NO SIGNAL", False, COLOUR_WHITE),
-    ("NO DATA",   False, COLOUR_RED),
-    ("RESUMED",   False, COLOUR_GREEN),
-    ("RESET OK",  False, COLOUR_GREEN),
-    ("REAL OK",   False, COLOUR_GREEN),
-    ("CONFIRM?",  False, COLOUR_YELLOW),
+    ("GOODBYE",    False, COLOUR_OFF),
+    ("READY",      False, COLOUR_GREEN),
+    ("STARTING",   False, COLOUR_YELLOW),
+    ("MKT OPEN",   False, COLOUR_GREEN),
+    ("MKT CLOSE",  False, COLOUR_OFF),
+    ("NO SIGNAL",  False, COLOUR_WHITE),
+    ("NO DATA",    False, COLOUR_RED),
+    ("RESUMED",    False, COLOUR_GREEN),
+    ("RESET OK",   False, COLOUR_GREEN),
+    ("REAL OK",    False, COLOUR_GREEN),
+    ("CONFIRM?",   False, COLOUR_YELLOW),
 
     # Balance selector
-    ("SET BAL",   False, COLOUR_BLUE),
-    ("BAL ",      True,  COLOUR_BLUE),
-    ("SET ",      True,  COLOUR_GREEN),
+    ("SET BAL",    False, COLOUR_BLUE),
+    ("BAL ",       True,  COLOUR_BLUE),
+    ("SET ",       True,  COLOUR_GREEN),
 
     # Menu navigation
-    ("  MODE  ",  False, COLOUR_BLUE),
-    ("  ALGO  ",  False, COLOUR_BLUE),
-    ("  RESET ",  False, COLOUR_BLUE),
-    ("  STATS ",  False, COLOUR_BLUE),
+    ("  MODE  ",   False, COLOUR_BLUE),
+    ("  ALGO  ",   False, COLOUR_BLUE),
+    ("  RESET ",   False, COLOUR_BLUE),
+    ("  STATS ",   False, COLOUR_BLUE),
 
     # Mode display
-    ("MODE ",     True,  COLOUR_BLUE),
-    ("ALGO ",     True,  COLOUR_BLUE),
+    ("MODE ",      True,  COLOUR_BLUE),
+    ("ALGO ",      True,  COLOUR_BLUE),
 
-    # Trading activity
-    ("EVALUATING",True,  COLOUR_YELLOW),
-    ("BUY OK",    True,  COLOUR_GREEN),
-    ("SELL OK",   True,  COLOUR_GREEN),
-    ("BUY ",      True,  COLOUR_YELLOW),
-    ("SELL ",     True,  COLOUR_YELLOW),
+    # Trading activity — OK variants must come before plain BUY/SELL
+    ("EVALUATING", True,  COLOUR_YELLOW),
+    ("BUY OK",     True,  COLOUR_GREEN),
+    ("SELL OK",    True,  COLOUR_GREEN),
+    ("BUY ",       True,  COLOUR_YELLOW),
+    ("SELL ",      True,  COLOUR_YELLOW),
 
     # Errors
-    ("ERR",       True,  COLOUR_RED),
-    ("AUTH",      True,  COLOUR_RED),
-    ("DATA ERR",  True,  COLOUR_RED),
-    ("BROKER ERR",True,  COLOUR_RED),
-    ("EXEC ERR",  True,  COLOUR_RED),
-    ("PRESS YES", True,  COLOUR_RED),
-    ("NO CONNECT",True,  COLOUR_RED),
-    ("API ERROR", True,  COLOUR_RED),
+    ("ERR",        True,  COLOUR_RED),
+    ("AUTH",       True,  COLOUR_RED),
+    ("DATA ERR",   True,  COLOUR_RED),
+    ("BROKER ERR", True,  COLOUR_RED),
+    ("EXEC ERR",   True,  COLOUR_RED),
+    ("PRESS YES",  True,  COLOUR_RED),
+    ("NO CONNECT", True,  COLOUR_RED),
+    ("API ERROR",  True,  COLOUR_RED),
 ]
-
-PASSIVE_PULSE_INTERVAL = 300   # seconds between idle pulses
 
 
 class LEDManager:
     """
     Controls the WS2812D LED based on what is shown on the display.
-
-    Call set_mode() when trading mode changes so the idle pulse
-    colour reflects paper (pink) vs real (white).
+    LED is off when the display is showing the idle P&L screen.
     """
 
     def __init__(self) -> None:
-        self._pixel         = None
-        self._lock          = threading.Lock()
-        self._running       = False
-        self._pulse_thread: Optional[threading.Thread] = None
-        self._is_idle       = True    # True when display is showing P&L idle screen
-        self._paper_mode    = True    # True = paper, False = real
+        self._pixel = None
+        self._lock  = threading.Lock()
 
     def start(self) -> None:
-        """Initialise hardware and start passive pulse thread."""
+        """Initialise hardware."""
         try:
             import board
             import neopixel
@@ -108,50 +96,34 @@ class LEDManager:
             logger.error("LEDManager: failed to init LED: %s", exc)
             self._pixel = None
 
-        self._running = True
-        self._pulse_thread = threading.Thread(
-            target=self._passive_pulse_loop,
-            name="LEDPulse",
-            daemon=True
-        )
-        self._pulse_thread.start()
-
     def stop(self) -> None:
-        """Turn off LED and stop background thread."""
-        self._running = False
-        if self._pulse_thread:
-            self._pulse_thread.join(timeout=5)
+        """Turn off LED."""
         self._write(COLOUR_OFF)
         logger.info("LEDManager stopped")
 
     # ── Public API ─────────────────────────────────────────────
 
-    def set_mode(self, paper: bool) -> None:
-        """Call when trading mode changes to update idle pulse colour."""
-        with self._lock:
-            self._paper_mode = paper
-
     def on_display_update(self, text: str) -> None:
-        """
-        Callback invoked by DisplayManager whenever the display changes.
-        Derives LED colour from the displayed text and applies it.
-        """
-        text_upper = text.strip().upper()
+        text_upper = text.upper()
 
-        # Idle screen: starts with "P " or "R " followed by P&L
-        # e.g. "P  +1234" — show no colour, let pulse thread handle it
-        if len(text_upper) >= 2 and text_upper[0] in ("P", "R") and text_upper[1] == " ":
-            with self._lock:
-                self._is_idle = True
+        # Blank screen (between scrolls or after shutdown) — LED off
+        if text_upper.strip() == "":
             self._write(COLOUR_OFF)
             return
 
-        with self._lock:
-            self._is_idle = False
+        # Idle P&L screen: stripped content starts with "P " or "R "
+        stripped = text_upper.strip()
+        if (
+            len(stripped) >= 2
+            and stripped[0] in ("P", "R")
+            and stripped[1] == " "
+        ):
+            self._write(COLOUR_OFF)
+            return
 
-        colour = self._colour_for(text_upper)
-        self._write(colour)
-
+        # Match against full unstripped text (preserves menu entry spaces)
+        self._write(self._colour_for(text_upper))        
+        
     # ── Colour resolution ──────────────────────────────────────
 
     def _colour_for(self, text: str) -> tuple:
@@ -163,26 +135,7 @@ class LEDManager:
             else:
                 if text == match or text.startswith(match):
                     return colour
-        # Default: white for any unrecognised message
         return COLOUR_WHITE
-
-    # ── Passive idle pulse ─────────────────────────────────────
-
-    def _passive_pulse_loop(self) -> None:
-        """Brief colour pulse every 5 minutes when display is idle."""
-        while self._running:
-            time.sleep(PASSIVE_PULSE_INTERVAL)
-            with self._lock:
-                idle = self._is_idle
-                paper = self._paper_mode
-
-            if not idle:
-                continue
-
-            colour = COLOUR_PINK if paper else COLOUR_WHITE
-            self._write(colour)
-            time.sleep(0.3)
-            self._write(COLOUR_OFF)
 
     # ── Hardware write ─────────────────────────────────────────
 
