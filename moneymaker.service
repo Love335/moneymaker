@@ -1,24 +1,24 @@
 [Unit]
 Description=Moneymaker Trading Bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=moneymaker
-WorkingDirectory=/home/moneymaker/moneymaker
-ExecStart=/home/moneymaker/moneymaker/venv/bin/python3 /home/pi/moneymaker/src/main.py
-Restart=on-failure
-RestartSec=30
+Documentation=https://github.com/Love335/moneymaker
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 StartLimitIntervalSec=300
 StartLimitBurst=3
 
-# Logging
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/moneymaker/moneymaker/src
+ExecStart=/home/moneymaker/moneymaker/venv/bin/python3 /home/moneymaker/moneymaker/src/main.py
+ExecStop=/bin/kill -SIGTERM $MAINPID
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=30
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=moneymaker
-
-# Security hardening
 NoNewPrivileges=yes
 PrivateTmp=yes
 

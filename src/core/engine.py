@@ -395,6 +395,15 @@ class Engine:
         logger.info("Performing graceful hardware and subsystem shutdown...")
         self._running = False
 
+        # Show goodbye before stopping anything
+        if self._display:
+            try:
+                self._display.stop_flashing()
+                self._display.show_message("GOODBYE")
+                time.sleep(2.5)  # let it scroll fully before we tear down
+            except Exception as e:
+                logger.error("Error showing goodbye: %s", e)
+
         # 1. Stop background processing tasks safely
         if self._scheduler:
             try: self._scheduler.stop()
@@ -406,7 +415,7 @@ class Engine:
             try: self._power.stop()
             except Exception as e: logger.error("Error stopping power manager: %s", e)
 
-        # 2. Kill the active LED configurations (triggers COLOUR_OFF internally)
+        # 2. Kill the active LED configurations
         if self._led:
             try:
                 self._led.stop()
@@ -414,17 +423,13 @@ class Engine:
             except Exception as e:
                 logger.error("Error clearing LEDs during shutdown: %s", e)
 
-        # 3. Clean up the MAX7219 Matrix/Segment Display
+        # 3. Clean up the display
         if self._display:
             try:
                 self._display.stop_flashing()
-                # Pass a blank string of spaces to clear all active text/segments
-                self._display.show_message("        ") 
-                
-                # Call an internal display stop/clear method if your DisplayManager defines one
+                self._display.show_message("        ")
                 if hasattr(self._display, 'stop'):
                     self._display.stop()
-                    
                 logger.info("DisplayManager cleared successfully.")
             except Exception as e:
                 logger.error("Error clearing display during shutdown: %s", e)

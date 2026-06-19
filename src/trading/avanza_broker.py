@@ -240,20 +240,38 @@ class AvanzaBroker(BaseBroker):
             try:
                 data = self._client.get_stock_info(orderbook_id)
 
-                # Try multiple field names — the API varies by instrument type
                 price = None
-                for field in ("lastPrice", "buyPrice", "currentPrice", "closingPrice"):
-                    raw = data.get(field)
+
+                # Primary: live quote fields (populated during market hours)
+                quote = data.get("quote") or {}
+                for field in ("last", "buy", "sell", "highest", "lowest"):
+                    raw = quote.get(field)
                     if raw is not None:
-                        price = _extract_value(raw) if isinstance(raw, dict) else float(raw)
-                        if price > 0:
-                            break
+                        try:
+                            candidate = float(raw)
+                            if candidate > 0:
+                                price = candidate
+                                break
+                        except (TypeError, ValueError):
+                            continue
+
+                # Fallback: most recent closing price (reliable after hours)
+                if price is None or price <= 0:
+                    hcp = data.get("historicalClosingPrices") or {}
+                    raw = hcp.get("oneDay")
+                    if raw is not None:
+                        try:
+                            candidate = float(raw)
+                            if candidate > 0:
+                                price = candidate
+                        except (TypeError, ValueError):
+                            pass
 
                 if price is None or price <= 0:
                     raise BrokerError(
                         f"No valid price in response for {ticker} "
                         f"(orderbook {orderbook_id}). "
-                        f"Fields present: {list(data.keys())}"
+                        f"quote fields: {list(quote.keys())}"
                     )
                 return price
 
@@ -374,8 +392,7 @@ class AvanzaBroker(BaseBroker):
                 return True
 
             try:
-                deals  = self._client.get_deals_and_orders()
-                orders = deals.get("orders", [])
+                orders = self._client.get_orders().get("orders", [])
 
                 account_orders = [
                     o for o in orders
