@@ -1,30 +1,28 @@
 """
 paper_setup.py — Balance selector shown on first fresh paper trading start.
-
 Cycles through balance options using the mode button.
 YES confirms, NO cancels and uses the default.
 """
-
 import logging
+import time
 import threading
 from typing import Optional
 
 from core.events import EventBus, EventType, Event
 from hardware.display import DisplayManager
-from hardware.led import LEDManager, LEDState
+from hardware.led import LEDManager
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BALANCE     = 10_000.0
-BALANCE_STEP        =  1_000.0
-BALANCE_MIN         =  1_000.0
-BALANCE_MAX         = 100_000.0
+DEFAULT_BALANCE = 10_000.0
+BALANCE_STEP    =  1_000.0
+BALANCE_MIN     =  1_000.0
+BALANCE_MAX     = 100_000.0
 
 
 class PaperBalanceSelector:
     """
     Interactive balance selector using physical buttons.
-
     Mode button → increment balance by 1,000 SEK
     YES button  → confirm selection
     NO button   → cancel (use default)
@@ -49,21 +47,17 @@ class PaperBalanceSelector:
         Block until user confirms or cancels.
         Returns the selected balance in SEK.
         """
-        self._display.show_message("SET BALANCE")
-        self._led.set_state(LEDState.WORKING)
-        self._show_balance()
-
-        # Subscribe to button events
+        # Subscribe before showing message so no button press is missed
         self._bus.subscribe(EventType.BUTTON_MODE_PRESSED, self._on_mode)
         self._bus.subscribe(EventType.BUTTON_YES_PRESSED,  self._on_yes)
         self._bus.subscribe(EventType.BUTTON_NO_PRESSED,   self._on_no)
 
-        # Wait for user input (no timeout — user must make a choice)
+        self._display.show_message("SET BAL")  # LED follows via callback
+        self._show_balance()
+
         while not self._confirmed.is_set() and not self._cancelled.is_set():
-            import time
             time.sleep(0.1)
 
-        # Unsubscribe
         self._bus.unsubscribe(EventType.BUTTON_MODE_PRESSED, self._on_mode)
         self._bus.unsubscribe(EventType.BUTTON_YES_PRESSED,  self._on_yes)
         self._bus.unsubscribe(EventType.BUTTON_NO_PRESSED,   self._on_no)
@@ -79,7 +73,7 @@ class PaperBalanceSelector:
         return self._balance
 
     def _on_mode(self, event: Event) -> None:
-        self._balance = min(self._balance + BALANCE_STEP, BALANCE_MAX)
+        self._balance += BALANCE_STEP
         if self._balance > BALANCE_MAX:
             self._balance = BALANCE_MIN   # wrap around
         self._show_balance()

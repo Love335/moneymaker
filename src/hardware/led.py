@@ -30,7 +30,7 @@ COLOUR_PINK   = (0,   100, 50)
 # Checked in order — first match wins.
 # Tuples of (match_string, is_prefix, colour)
 DISPLAY_COLOUR_MAP = [
-    # Exact matches first
+    # Exact matches
     ("GOODBYE",   False, COLOUR_OFF),
     ("READY",     False, COLOUR_GREEN),
     ("STARTING",  False, COLOUR_YELLOW),
@@ -41,27 +41,39 @@ DISPLAY_COLOUR_MAP = [
     ("RESUMED",   False, COLOUR_GREEN),
     ("RESET OK",  False, COLOUR_GREEN),
     ("REAL OK",   False, COLOUR_GREEN),
-    ("MODE",      False, COLOUR_BLUE),
-    ("  MODE  ", False, COLOUR_BLUE),
-    ("  ALGO  ", False, COLOUR_BLUE),
-    ("  RESET ", False, COLOUR_BLUE),
-    ("  STATS ", False, COLOUR_BLUE),
-    ("CONFIRM?", False, COLOUR_YELLOW),
+    ("CONFIRM?",  False, COLOUR_YELLOW),
 
-    # Prefix matches
-    ("BUY",       True,  COLOUR_YELLOW),
-    ("SELL",      True,  COLOUR_YELLOW),
+    # Balance selector
+    ("SET BAL",   False, COLOUR_BLUE),
+    ("BAL ",      True,  COLOUR_BLUE),
+    ("SET ",      True,  COLOUR_GREEN),
+
+    # Menu navigation
+    ("  MODE  ",  False, COLOUR_BLUE),
+    ("  ALGO  ",  False, COLOUR_BLUE),
+    ("  RESET ",  False, COLOUR_BLUE),
+    ("  STATS ",  False, COLOUR_BLUE),
+
+    # Mode display
+    ("MODE ",     True,  COLOUR_BLUE),
+    ("ALGO ",     True,  COLOUR_BLUE),
+
+    # Trading activity
+    ("EVALUATING",True,  COLOUR_YELLOW),
     ("BUY OK",    True,  COLOUR_GREEN),
     ("SELL OK",   True,  COLOUR_GREEN),
-    ("ALGO",      True,  COLOUR_BLUE),
+    ("BUY ",      True,  COLOUR_YELLOW),
+    ("SELL ",     True,  COLOUR_YELLOW),
+
+    # Errors
     ("ERR",       True,  COLOUR_RED),
     ("AUTH",      True,  COLOUR_RED),
     ("DATA ERR",  True,  COLOUR_RED),
     ("BROKER ERR",True,  COLOUR_RED),
     ("EXEC ERR",  True,  COLOUR_RED),
-    ("CONFIRM",   True,  COLOUR_RED),
     ("PRESS YES", True,  COLOUR_RED),
-    ("EVALUATING",True,  COLOUR_YELLOW),
+    ("NO CONNECT",True,  COLOUR_RED),
+    ("API ERROR", True,  COLOUR_RED),
 ]
 
 PASSIVE_PULSE_INTERVAL = 300   # seconds between idle pulses
