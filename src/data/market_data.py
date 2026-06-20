@@ -9,7 +9,6 @@ Never passes bad data downstream — fails loudly instead.
 
 import logging
 import threading
-import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -27,8 +26,13 @@ HISTORY_MONTHS = 14
 MIN_PRICE_SEK = 0.001
 MAX_PRICE_SEK = 1_000_000.0
 
-# Maximum age of data before it is considered stale (seconds)
-MAX_DATA_AGE_SECONDS = 300   # 5 minutes
+# Minimum number of data points required for a valid history
+MIN_HISTORY_LENGTH = 30
+
+
+class MarketDataError(Exception):
+    """Raised when market data cannot be fetched or fails validation."""
+    pass
 
 
 class MarketDataService:
@@ -116,10 +120,10 @@ class MarketDataService:
     def _fetch_current_price(self, ticker: str) -> float:
         """Fetch latest price from yfinance."""
         try:
-            data = yf.Ticker(ticker)
-            info = data.fast_info
-
+            data  = yf.Ticker(ticker)
+            info  = data.fast_info
             price = getattr(info, "last_price", None)
+
             if price is None:
                 # Fallback: use last close from recent history
                 hist = data.history(period="2d")
@@ -159,13 +163,13 @@ class MarketDataService:
                 )
 
             close_data = data["Close"]
-            
-            # If yfinance returned a DataFrame, extract the first column to make it a Series
+
+            # yfinance may return a DataFrame instead of a Series
+            # when multiple tickers are requested — normalise to Series
             if hasattr(close_data, "columns"):
                 close_data = close_data.iloc[:, 0]
-                
-            closes = close_data.dropna().tolist()
 
+            closes = close_data.dropna().tolist()
             return [float(p) for p in closes]
 
         except MarketDataError:
@@ -183,6 +187,10 @@ class MarketDataService:
             raise MarketDataError(
                 f"Non-numeric price for {ticker}: {price!r}"
             )
+        if price != price:   # NaN check — NaN is never equal to itself
+            raise MarketDataError(
+                f"NaN price received for {ticker}"
+            )
         if price < MIN_PRICE_SEK:
             raise MarketDataError(
                 f"Price for {ticker} is suspiciously low: {price}"
@@ -191,19 +199,19 @@ class MarketDataService:
             raise MarketDataError(
                 f"Price for {ticker} is suspiciously high: {price}"
             )
-        if price != price:   # NaN check
-            raise MarketDataError(
-                f"NaN price received for {ticker}"
-            )
 
     def _validate_history(self, ticker: str, history: List[float]) -> None:
         """Raise MarketDataError if history is insufficient or corrupt."""
-        if len(history) < 30:
+        if len(history) < MIN_HISTORY_LENGTH:
             raise MarketDataError(
                 f"Insufficient history for {ticker}: "
-                f"only {len(history)} data points"
+                f"only {len(history)} data points (need {MIN_HISTORY_LENGTH})"
             )
         for i, price in enumerate(history):
+            if price != price:
+                raise MarketDataError(
+                    f"NaN at index {i} in {ticker} history"
+                )
             if price < MIN_PRICE_SEK or price > MAX_PRICE_SEK:
                 raise MarketDataError(
                     f"Invalid price at index {i} in {ticker} history: {price}"
@@ -213,8 +221,3 @@ class MarketDataService:
             raise MarketDataError(
                 f"History for {ticker} appears stale — last 10 prices identical"
             )
-
-
-class MarketDataError(Exception):
-    """Raised when market data cannot be fetched or fails validation."""
-    pass

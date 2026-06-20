@@ -20,7 +20,8 @@ class EventType(Enum):
     BUTTON_YES_PRESSED      = auto()
     BUTTON_NO_PRESSED       = auto()
     BUTTON_MODE_PRESSED     = auto()
-    SWITCH_OFF_TRIGGERED    = auto()
+    # Note: physical power switch is handled entirely by the kernel
+    # via dtoverlay=gpio-shutdown — no Python event is needed or fired.
 
     # ── Market ────────────────────────────────────────────────
     MARKET_OPENED           = auto()
@@ -87,21 +88,27 @@ class EventBus:
     When an event is published it is placed on an internal queue and
     dispatched on the bus's own dedicated thread, so publishers are
     never blocked waiting for slow subscribers.
+
+    Subscriber callbacks are invoked outside the internal lock so
+    subscribers can freely call subscribe()/unsubscribe() on the bus
+    during their own execution without deadlocking. A subscriber that
+    unsubscribes itself mid-dispatch will be removed for all future
+    events; the current dispatch cycle has already captured the list.
     """
 
     def __init__(self) -> None:
         self._subscribers: Dict[EventType, List[Subscriber]] = {}
-        self._queue: queue.Queue[Event] = queue.Queue()
-        self._lock = threading.Lock()
-        self._running = False
-        self._thread: threading.Thread | None = None
+        self._queue:       queue.Queue[Event] = queue.Queue()
+        self._lock         = threading.Lock()
+        self._running      = False
+        self._thread:      threading.Thread | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────
 
     def start(self) -> None:
         """Start the dispatch thread."""
         self._running = True
-        self._thread = threading.Thread(
+        self._thread  = threading.Thread(
             target=self._dispatch_loop,
             name="EventBus",
             daemon=True
@@ -110,10 +117,18 @@ class EventBus:
         logger.info("EventBus started")
 
     def stop(self) -> None:
-        """Stop the dispatch thread gracefully."""
+        """
+        Stop the dispatch thread gracefully.
+        Safe to call multiple times — the sentinel is only placed on
+        the queue if the bus is currently running, preventing duplicate
+        sentinels from accumulating if stop() is called more than once.
+        """
+        if not self._running:
+            return
         self._running = False
-        # Unblock the queue with a sentinel
-        self._queue.put(None)  # type: ignore[arg-type]
+        # Unblock the queue.get() call with a sentinel so the thread
+        # exits immediately rather than waiting for the next timeout
+        self._queue.put(None)   # type: ignore[arg-type]
         if self._thread:
             self._thread.join(timeout=5)
         logger.info("EventBus stopped")
@@ -126,7 +141,10 @@ class EventBus:
             if event_type not in self._subscribers:
                 self._subscribers[event_type] = []
             self._subscribers[event_type].append(callback)
-        logger.debug("Subscribed %s to %s", callback.__qualname__, event_type.name)
+        logger.debug(
+            "Subscribed %s to %s",
+            callback.__qualname__, event_type.name
+        )
 
     def unsubscribe(self, event_type: EventType, callback: Subscriber) -> None:
         """Remove a previously registered callback."""
@@ -142,17 +160,10 @@ class EventBus:
         Publish an event. Non-blocking — places event on queue
         and returns immediately.
         """
-        logger.debug("Published: %s from %s", event.type.name, event.source)
+        logger.debug(
+            "Published: %s from %s", event.type.name, event.source
+        )
         self._queue.put(event)
-
-    def publish_simple(
-        self,
-        event_type: EventType,
-        source: str = "unknown",
-        **kwargs: Any
-    ) -> None:
-        """Convenience method for publishing without constructing an Event."""
-        self.publish(Event(type=event_type, payload=kwargs, source=source))
 
     # ── Internal ──────────────────────────────────────────────
 
@@ -162,15 +173,23 @@ class EventBus:
             try:
                 event = self._queue.get(timeout=1)
                 if event is None:
+                    # Sentinel received — bus is stopping
                     break
                 self._dispatch(event)
             except queue.Empty:
                 continue
             except Exception:
-                logger.exception("Unexpected error in EventBus dispatch loop")
+                logger.exception(
+                    "Unexpected error in EventBus dispatch loop"
+                )
 
     def _dispatch(self, event: Event) -> None:
-        """Deliver an event to all registered subscribers."""
+        """
+        Deliver an event to all registered subscribers.
+        The subscriber list is copied under the lock, then callbacks
+        are invoked without holding the lock so subscribers can safely
+        call subscribe()/unsubscribe() during their own execution.
+        """
         with self._lock:
             callbacks = list(self._subscribers.get(event.type, []))
 

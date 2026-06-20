@@ -6,6 +6,7 @@ transition is legal before applying it. No component mutates state
 directly. Thread-safe via a reentrant lock.
 """
 
+import copy
 import threading
 import logging
 from enum import Enum, auto
@@ -13,6 +14,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Canonical algorithm names — shared with engine.ALGORITHM_REGISTRY.
+# Both must be kept in sync. StateManager validates against this set.
+VALID_ALGORITHMS = {"dual_momentum", "mean_reversion", "trend_following"}
 
 
 class TradingMode(Enum):
@@ -29,6 +34,7 @@ class SystemStatus(Enum):
     SHUTTING_DOWN     = auto()
     SUSPENDED         = auto()
 
+
 class ConnectivityStatus(Enum):
     CONNECTED    = auto()
     DISCONNECTED = auto()
@@ -44,16 +50,17 @@ class AppState:
     External components should call StateManager methods,
     not access this object directly.
     """
-    trading_mode:        TradingMode         = TradingMode.PAPER
-    system_status:       SystemStatus        = SystemStatus.STARTING
-    connectivity:        ConnectivityStatus  = ConnectivityStatus.DISCONNECTED
-    active_algorithm:    str                 = "dual_momentum"
-    risk_level:          float               = 0.5     # 0.0 = lowest, 1.0 = highest
-    current_pnl:         float               = 0.0     # total all-time P&L in SEK
-    paper_balance:       float               = 0.0     # starting balance for paper mode
-    market_is_open:      bool                = False
-    pending_urgent_msgs: list                = field(default_factory=list)
-    last_crash_reason:   Optional[str]       = None
+    trading_mode:         TradingMode        = TradingMode.PAPER
+    system_status:        SystemStatus       = SystemStatus.STARTING
+    connectivity:         ConnectivityStatus = ConnectivityStatus.DISCONNECTED
+    active_algorithm:     str                = "dual_momentum"
+    risk_level:           float              = 0.5
+    current_pnl:          float              = 0.0
+    # None means not yet set — use set_paper_balance() before reading
+    paper_balance:        Optional[float]    = None
+    market_is_open:       bool               = False
+    pending_urgent_msgs:  list               = field(default_factory=list)
+    last_crash_reason:    Optional[str]      = None
     crash_is_recoverable: bool               = True
 
 
@@ -65,8 +72,6 @@ class StateManager:
     Uses a reentrant lock so methods can safely call each other.
     """
 
-    VALID_ALGORITHMS = {"dual_momentum", "mean_reversion", "trend_following"}
-
     def __init__(self) -> None:
         self._state = AppState()
         self._lock  = threading.RLock()
@@ -75,24 +80,28 @@ class StateManager:
 
     @property
     def state(self) -> AppState:
-        """Read-only snapshot. Do not mutate the returned object."""
+        """Direct access to state. Do not mutate outside StateManager."""
         return self._state
 
     def snapshot(self) -> AppState:
-        """Return a shallow copy for safe reading outside the lock."""
+        """
+        Return a deep copy for safe reading outside the lock.
+        Deep copy ensures the pending_urgent_msgs list and any other
+        mutable fields are fully independent of the live state.
+        """
         with self._lock:
-            from copy import copy
-            return copy(self._state)
+            return copy.deepcopy(self._state)
 
     # ── System status ─────────────────────────────────────────
 
     def set_status(self, status: SystemStatus) -> None:
         with self._lock:
             old = self._state.system_status
-            self._state.system_status = status
-            
             if old != status:
-                logger.info("System status: %s → %s", old.name, status.name)
+                logger.info(
+                    "System status: %s → %s", old.name, status.name
+                )
+            self._state.system_status = status
 
     # ── Trading mode ──────────────────────────────────────────
 
@@ -101,12 +110,10 @@ class StateManager:
         with self._lock:
             if self._state.system_status == SystemStatus.SHUTTING_DOWN:
                 raise StateError("Cannot switch mode during shutdown")
-
             if self._state.trading_mode == TradingMode.PAPER:
                 self._state.trading_mode = TradingMode.REAL
             else:
                 self._state.trading_mode = TradingMode.PAPER
-
             new_mode = self._state.trading_mode
             logger.info("Trading mode switched to %s", new_mode.name)
             return new_mode
@@ -115,10 +122,10 @@ class StateManager:
 
     def switch_algorithm(self, algorithm_name: str) -> None:
         with self._lock:
-            if algorithm_name not in self.VALID_ALGORITHMS:
+            if algorithm_name not in VALID_ALGORITHMS:
                 raise StateError(
                     f"Unknown algorithm '{algorithm_name}'. "
-                    f"Valid options: {self.VALID_ALGORITHMS}"
+                    f"Valid options: {VALID_ALGORITHMS}"
                 )
             old = self._state.active_algorithm
             self._state.active_algorithm = algorithm_name
@@ -127,17 +134,16 @@ class StateManager:
     def next_algorithm(self) -> str:
         """Cycle to the next algorithm and return its name."""
         with self._lock:
-            algorithms = sorted(self.VALID_ALGORITHMS)
+            algorithms = sorted(VALID_ALGORITHMS)
             current_idx = algorithms.index(self._state.active_algorithm)
-            next_idx = (current_idx + 1) % len(algorithms)
-            next_algo = algorithms[next_idx]
+            next_idx    = (current_idx + 1) % len(algorithms)
+            next_algo   = algorithms[next_idx]
             self.switch_algorithm(next_algo)
             return next_algo
 
     # ── Risk level ────────────────────────────────────────────
 
     def set_risk_level(self, level: float) -> None:
-        """Set risk level. Must be between 0.0 and 1.0."""
         with self._lock:
             if not 0.0 <= level <= 1.0:
                 raise StateError(
@@ -166,9 +172,7 @@ class StateManager:
         with self._lock:
             old = self._state.connectivity
             self._state.connectivity = status
-            logger.info(
-                "Connectivity: %s → %s", old.name, status.name
-            )
+            logger.info("Connectivity: %s → %s", old.name, status.name)
 
     # ── Paper trading ─────────────────────────────────────────
 
@@ -185,9 +189,10 @@ class StateManager:
 
     def record_crash(self, reason: str, recoverable: bool) -> None:
         with self._lock:
-            self._state.last_crash_reason   = reason
+            self._state.last_crash_reason    = reason
             self._state.crash_is_recoverable = recoverable
-            self._state.system_status       = SystemStatus.AWAITING_RECOVERY
+            # Use set_status() so the transition is logged consistently
+            self.set_status(SystemStatus.AWAITING_RECOVERY)
             logger.critical(
                 "Crash recorded. Recoverable: %s. Reason: %s",
                 recoverable, reason

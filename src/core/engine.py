@@ -31,7 +31,6 @@ from applogging.logger import classify_crash, log_trade, setup_trade_logger
 from trading.broker import BaseBroker, BrokerError, OrderStatus
 from trading.paper_broker import PaperBroker
 from ui.menu import MenuManager
-import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +62,10 @@ class Engine:
 
     def __init__(
         self,
-        display:  DisplayManager,
-        led:      LEDManager,
-        state:    StateManager,
-        bus:      EventBus,
+        display: DisplayManager,
+        led:     LEDManager,
+        state:   StateManager,
+        bus:     EventBus,
     ) -> None:
         self._display      = display
         self._led          = led
@@ -74,10 +73,10 @@ class Engine:
         self._bus          = bus
         self._trade_logger = setup_trade_logger()
         self._running      = False
-        self._shutdown_event = threading.Event()
+        self._shutdown_event     = threading.Event()
         self._recovery_confirmed = threading.Event()
         self._consecutive_recoveries = 0
-        self._lock         = threading.Lock()
+        self._lock           = threading.Lock()
         self._last_heartbeat: float = time.monotonic()
         self._heartbeat_interval: int = 300
 
@@ -86,25 +85,11 @@ class Engine:
         self._algorithm:   Optional[BaseAlgorithm]     = None
         self._market_data: Optional[MarketDataService] = None
         self._scheduler:   Optional[MarketScheduler]   = None
-        self._buttons:     Optional[ButtonManager]      = None
-        self._power:       Optional[PowerManager]       = None
-        self._menu:        Optional[MenuManager]        = None
+        self._buttons:     Optional[ButtonManager]     = None
+        self._power:       Optional[PowerManager]      = None
+        self._menu:        Optional[MenuManager]       = None
 
-        self._setup_os_signal_handlers()
         self._subscribe_all()
-
-    def _setup_os_signal_handlers(self) -> None:
-        """Register hooks to catch systemd/OS shutdown signals."""
-        signal.signal(signal.SIGTERM, self._handle_os_signal)
-        signal.signal(signal.SIGINT,  self._handle_os_signal)
-
-    def _handle_os_signal(self, signum, frame) -> None:
-        """Callback when Linux tells this process to stop."""
-        logger.info(
-            "OS signal %d received. Intercepting for clean hardware termination.",
-            signum
-        )
-        self._shutdown_event.set()
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -117,6 +102,8 @@ class Engine:
         Initialise all subsystems and enter the main loop.
         This method blocks until shutdown is requested.
         """
+        import config
+
         logger.info("Engine starting")
         self._display.show_message("STARTING")
 
@@ -129,11 +116,6 @@ class Engine:
             self._menu        = MenuManager(
                 self._bus, self._state, self._display, self._led
             )
-
-            import config
-
-            # Wire LED to display — LED colour now derives from display content
-            self._display.set_led_callback(self._led.on_display_update)
 
             self._load_algorithm(starting_algo)
             self._state.set_risk_level(config.RISK_LEVEL)
@@ -152,13 +134,31 @@ class Engine:
                 source="Engine"
             ))
 
+            # Register OS signal handlers here — subsystems now exist
+            self._setup_os_signal_handlers()
+
             self._main_loop()
 
         except Exception as exc:
             reason, recoverable = classify_crash(exc)
             logger.critical("Engine failed to start: %s", reason)
             self._display.show_message("ERR START")
+            # Best-effort hardware cleanup on startup failure
+            self._perform_shutdown()
             raise
+
+    def _setup_os_signal_handlers(self) -> None:
+        """Register hooks to catch systemd/OS shutdown signals."""
+        signal.signal(signal.SIGTERM, self._handle_os_signal)
+        signal.signal(signal.SIGINT,  self._handle_os_signal)
+
+    def _handle_os_signal(self, signum, frame) -> None:
+        """Callback when Linux tells this process to stop."""
+        logger.info(
+            "OS signal %d received — intercepting for clean hardware termination.",
+            signum
+        )
+        self._shutdown_event.set()
 
     def _main_loop(self) -> None:
         """
@@ -189,6 +189,7 @@ class Engine:
                         self._state.set_status(SystemStatus.RUNNING)
                         self._display.show_message("RESUMED")
                         self._last_heartbeat = time.monotonic()
+                        self._consecutive_recoveries = 0
                     continue
 
                 # ── Heartbeat ─────────────────────────────────
@@ -201,6 +202,8 @@ class Engine:
                 # ── Market closed ─────────────────────────────
                 if not snap.market_is_open:
                     self._state.set_status(SystemStatus.MARKET_CLOSED)
+                    # Use wait() so a shutdown signal wakes us immediately
+                    # rather than sleeping the full 60 seconds
                     if self._shutdown_event.wait(timeout=MARKET_CLOSED_SLEEP):
                         continue
                     continue
@@ -211,19 +214,26 @@ class Engine:
                 interval = algo.evaluation_interval_seconds if algo else 3600
 
                 if now - last_evaluation >= interval:
-                    self._run_evaluation()
+                    success = self._run_evaluation()
                     last_evaluation = now
+                    if success:
+                        # Reset crash counter after a clean evaluation
+                        self._consecutive_recoveries = 0
 
+                # Use wait() so shutdown wakes this sleep immediately
                 if self._shutdown_event.wait(timeout=1):
                     continue
 
             except Exception as exc:
                 self._handle_crash(exc)
 
-    def _run_evaluation(self) -> None:
-        """Fetch data, run algorithm, execute signals."""
+    def _run_evaluation(self) -> bool:
+        """
+        Fetch data, run algorithm, execute signals.
+        Returns True if evaluation completed without errors.
+        """
         if not self._algorithm or not self._broker:
-            return
+            return False
 
         snap = self._state.snapshot()
         logger.info(
@@ -250,7 +260,7 @@ class Engine:
             if not prices:
                 logger.warning("Evaluation: no price data available, skipping")
                 self._display.show_message("NO DATA")
-                return
+                return False
 
             market_snap = MarketSnapshot(
                 prices=prices,
@@ -264,17 +274,25 @@ class Engine:
             if not signals:
                 logger.info("Evaluation: no trade signals generated")
                 self._display.show_message("NO SIGNAL")
-                return
+            else:
+                for sig in signals:
+                    if sig.action == TradeAction.HOLD:
+                        continue
+                    self._execute_signal(sig, overview.liquid_sek, snap)
 
-            for signal in signals:
-                if signal.action == TradeAction.HOLD:
-                    continue
-                self._execute_signal(signal, overview.liquid_sek, snap)
+            # Update P&L — separate try/except so a failure here
+            # doesn't mark the whole evaluation as failed
+            try:
+                updated_overview = self._broker.get_account_overview()
+                pnl = self._calculate_pnl(updated_overview)
+                self._state.update_pnl(pnl)
+                self._display.update_pnl(pnl)
+            except Exception as exc:
+                logger.error(
+                    "Evaluation: failed to update P&L after trading: %s", exc
+                )
 
-            updated_overview = self._broker.get_account_overview()
-            pnl = self._calculate_pnl(updated_overview)
-            self._state.update_pnl(pnl)
-            self._display.update_pnl(pnl)
+            return True
 
         except MarketDataError as exc:
             logger.error("Evaluation: market data error — %s", exc)
@@ -284,6 +302,8 @@ class Engine:
                 source="Engine",
                 payload={"error": str(exc)}
             ))
+            return False
+
         except BrokerError as exc:
             logger.error("Evaluation: broker error — %s", exc)
             self._display.show_message("BROKER ERR")
@@ -292,35 +312,36 @@ class Engine:
                 source="Engine",
                 payload={"error": str(exc)}
             ))
+            return False
 
     def _execute_signal(
         self,
-        signal,
+        sig,
         liquid_sek: float,
         snap:       AppState,
     ) -> None:
         """Execute a single trade signal through the broker."""
-        amount_sek = round(liquid_sek * signal.fraction, 2)
+        amount_sek = round(liquid_sek * sig.fraction, 2)
         if amount_sek < 10.0:
             logger.info(
                 "Signal for %s: amount %.2f SEK too small, skipping",
-                signal.ticker, amount_sek
+                sig.ticker, amount_sek
             )
             return
 
-        action_str = signal.action.value
+        action_str = sig.action.value
         logger.info(
             "Executing: %s %s %.2f SEK (algo=%s confidence=%.2f)",
-            action_str, signal.ticker, amount_sek,
-            signal.algorithm, signal.confidence
+            action_str, sig.ticker, amount_sek,
+            sig.algorithm, sig.confidence
         )
         self._display.show_message(
-            f"{action_str} {signal.ticker[:5]} {amount_sek:.0f}SEK"
+            f"{action_str} {sig.ticker[:5]} {amount_sek:.0f}SEK"
         )
 
         try:
             result = self._broker.place_order(
-                ticker=signal.ticker,
+                ticker=sig.ticker,
                 action=action_str,
                 amount_sek=amount_sek,
             )
@@ -330,13 +351,13 @@ class Engine:
             log_trade(
                 trade_logger=self._trade_logger,
                 action=action_str,
-                ticker=signal.ticker,
+                ticker=sig.ticker,
                 amount=amount_sek,
                 price=result.executed_price,
                 mode=snap.trading_mode.value,
-                algorithm=signal.algorithm,
+                algorithm=sig.algorithm,
                 result=result.status.name,
-                notes=signal.reason,
+                notes=sig.reason,
             )
 
             if success:
@@ -347,24 +368,26 @@ class Engine:
                     type=EventType.TRADE_EXECUTED,
                     source="Engine",
                     payload={
-                        "ticker":  signal.ticker,
-                        "action":  action_str,
-                        "amount":  amount_sek,
-                        "price":   result.executed_price,
+                        "ticker": sig.ticker,
+                        "action": action_str,
+                        "amount": amount_sek,
+                        "price":  result.executed_price,
                     }
                 ))
             else:
-                self._display.show_message(f"ERR {signal.ticker[:4]}")
+                self._display.show_message(f"ERR {sig.ticker[:4]}")
                 self._bus.publish(Event(
                     type=EventType.TRADE_FAILED,
                     source="Engine",
                     payload={"reason": result.error_message}
                 ))
 
-            self._algorithm.on_trade_executed(signal, success)
+            self._algorithm.on_trade_executed(sig, success)
 
         except BrokerError as exc:
-            logger.error("Trade execution error for %s: %s", signal.ticker, exc)
+            logger.error(
+                "Trade execution error for %s: %s", sig.ticker, exc
+            )
             self._display.show_message("EXEC ERR")
 
     def _perform_shutdown(self) -> None:
@@ -386,8 +409,8 @@ class Engine:
             try: self._power.stop()
             except Exception as e: logger.error("Error stopping power manager: %s", e)
 
-        # 2. Stop display thread, then write GOODBYE directly.
-        #    The LED callback fires from show_text() → LED goes off automatically
+        # 2. Stop display thread then write GOODBYE directly.
+        #    LED callback fires from show_text() → LED goes off automatically
         #    because GOODBYE maps to COLOUR_OFF in the LED colour map.
         if self._display:
             try:
@@ -399,8 +422,8 @@ class Engine:
             except Exception as e:
                 logger.error("Error writing goodbye to display: %s", e)
 
-        # 3. Stop LED — hardware-level guarantee it's off even if callback
-        #    somehow didn't fire
+        # 3. Stop LED — hardware-level guarantee it's off even if
+        #    the callback didn't fire
         if self._led:
             try:
                 self._led.stop()
@@ -413,15 +436,15 @@ class Engine:
     # ── Event handlers ────────────────────────────────────────
 
     def _subscribe_all(self) -> None:
-        self._bus.subscribe(EventType.MARKET_OPENED,        self._on_market_opened)
-        self._bus.subscribe(EventType.MARKET_CLOSED,        self._on_market_closed)
-        self._bus.subscribe(EventType.SHUTDOWN_REQUESTED,   self._on_shutdown_requested)
-        self._bus.subscribe(EventType.MODE_SWITCHED,        self._on_mode_switched)
-        self._bus.subscribe(EventType.ALGORITHM_SWITCHED,   self._on_algorithm_switched)
+        self._bus.subscribe(EventType.MARKET_OPENED,         self._on_market_opened)
+        self._bus.subscribe(EventType.MARKET_CLOSED,         self._on_market_closed)
+        self._bus.subscribe(EventType.SHUTDOWN_REQUESTED,    self._on_shutdown_requested)
+        self._bus.subscribe(EventType.MODE_SWITCHED,         self._on_mode_switched)
+        self._bus.subscribe(EventType.ALGORITHM_SWITCHED,    self._on_algorithm_switched)
         self._bus.subscribe(EventType.PAPER_PORTFOLIO_RESET, self._on_paper_reset)
-        self._bus.subscribe(EventType.CONNECTION_LOST,      self._on_connection_lost)
-        self._bus.subscribe(EventType.API_ERROR,            self._on_api_error)
-        self._bus.subscribe(EventType.BUTTON_YES_PRESSED,   self._on_yes_for_recovery)
+        self._bus.subscribe(EventType.CONNECTION_LOST,       self._on_connection_lost)
+        self._bus.subscribe(EventType.API_ERROR,             self._on_api_error)
+        self._bus.subscribe(EventType.BUTTON_YES_PRESSED,    self._on_yes_for_recovery)
 
     def _on_market_opened(self, event: Event) -> None:
         logger.info("Market opened")
@@ -447,7 +470,6 @@ class Engine:
         char     = "P" if new_mode == TradingMode.PAPER else "R"
         self._display.set_mode_char(char)
         self._display.show_message(f"MODE {new_mode.value}")
-
         logger.info("Mode switched to %s", new_mode.value)
 
         if new_mode == TradingMode.PAPER:
@@ -469,7 +491,7 @@ class Engine:
             except Exception as exc:
                 logger.error("Failed to init real broker: %s", exc)
                 self._display.show_message("AUTH ERR")
-                self._state.switch_trading_mode()  # revert to paper
+                self._state.switch_trading_mode()   # revert to paper
                 self._display.set_mode_char("P")
 
     def _on_algorithm_switched(self, event: Event) -> None:
@@ -490,7 +512,7 @@ class Engine:
     def _on_connection_lost(self, event: Event) -> None:
         logger.warning("Connection lost: %s", event.payload.get("error"))
         self._state.set_connectivity(ConnectivityStatus.DISCONNECTED)
-        self._display.show_message("NO CONNECTION")
+        self._display.show_message("NO CONNECT")
 
     def _on_api_error(self, event: Event) -> None:
         logger.error("API error: %s", event.payload.get("error"))
@@ -518,9 +540,12 @@ class Engine:
             self._display.show_message(
                 f"ERR RETRY {self._consecutive_recoveries}"
             )
-            time.sleep(RECOVERABLE_RESTART_DELAY)
-            self._state.clear_crash()
-            self._state.set_status(SystemStatus.RUNNING)
+            # wait() wakes immediately if shutdown is requested
+            # rather than sleeping the full delay uninterruptibly
+            self._shutdown_event.wait(timeout=RECOVERABLE_RESTART_DELAY)
+            if not self._shutdown_event.is_set():
+                self._state.clear_crash()
+                self._state.set_status(SystemStatus.RUNNING)
         else:
             logger.critical(
                 "Unrecoverable crash or too many retries — "
@@ -541,7 +566,17 @@ class Engine:
         logger.info("Algorithm loaded: %s", name)
 
     def _get_required_tickers(self) -> list:
-        """Return all tickers needed by the current algorithm."""
+        """
+        Return all tickers needed by the current algorithm.
+        Asks the algorithm itself if it exposes a tickers property,
+        otherwise falls back to the hardcoded registry.
+        Raises RuntimeError for unknown algorithms so misconfiguration
+        is never silently ignored.
+        """
+        if self._algorithm and hasattr(self._algorithm, 'required_tickers'):
+            return self._algorithm.required_tickers
+
+        # Fallback for algorithms that don't yet expose required_tickers
         from algorithms.dual_momentum import CANDIDATE_TICKERS as DM_TICKERS
         from algorithms.mean_reversion import UNIVERSE as MR_UNIVERSE
         from algorithms.trend_following import PRIMARY_TICKER, BOND_TICKER
@@ -555,7 +590,12 @@ class Engine:
             return MR_UNIVERSE
         elif algo == "trend_following":
             return [PRIMARY_TICKER, BOND_TICKER]
-        return []
+
+        raise RuntimeError(
+            f"Unknown algorithm '{algo}' — cannot determine required tickers. "
+            f"Add it to _get_required_tickers() or implement required_tickers "
+            f"on the algorithm class."
+        )
 
     def _calculate_pnl(self, overview) -> float:
         """Calculate all-time P&L from account overview."""

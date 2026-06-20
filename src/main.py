@@ -8,6 +8,7 @@ No business logic lives here — only initialisation and wiring.
 import logging
 import sys
 from pathlib import Path
+from trading.paper_broker import PORTFOLIO_FILE
 
 # ── Logging must be set up before any other import ────────────
 sys.path.insert(0, str(Path(__file__).parent))
@@ -44,13 +45,13 @@ def main() -> None:
     bus.start()
     display.start()
     led.start()
+    display.set_led_callback(led.on_display_update) z
 
     try:
         # ── Paper trading setup ───────────────────────────────
         # Check if this is a fresh paper portfolio
         paper_broker = PaperBroker()
 
-        from trading.paper_broker import PORTFOLIO_FILE
         is_fresh = not PORTFOLIO_FILE.exists()
 
         if is_fresh:
@@ -85,14 +86,15 @@ def main() -> None:
     except Exception:
         logger.exception("Fatal error in main()")
         display.flash_message("FATAL ERR")
+        time.sleep(2)
         raise
 
     finally:
         logger.info("Cleaning up")
         bus.stop()
+        display.stop()
+        led.stop()
         logger.info("moneymaker shutdown complete")
-        logger.info("=" * 60)
-
 
 if __name__ == "__main__":
     main()
