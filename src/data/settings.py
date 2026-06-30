@@ -18,10 +18,11 @@ SETTINGS_FILE = Path(__file__).resolve().parents[2] / "data" / "settings.json"
 
 # Default values
 DEFAULTS: dict[str, Any] = {
-    "display_brightness": 128,   # 0–255, MAX7219 contrast
-    "led_brightness":     0.3,   # 0.0–1.0, NeoPixel brightness
+    "display_brightness": 128,
+    "led_brightness":     0.3,
+    "trading_mode":       "PAPER",
+    "active_algorithm":   "dual_momentum",
 }
-
 
 class Settings:
     """

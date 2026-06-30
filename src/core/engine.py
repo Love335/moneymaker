@@ -23,6 +23,7 @@ from core.state import (
     SystemStatus, TradingMode
 )
 from data.market_data import MarketDataService, MarketDataError
+from data.settings import Settings
 from hardware.display import DisplayManager
 from hardware.led import LEDManager
 from hardware.buttons import ButtonManager
@@ -31,26 +32,19 @@ from applogging.logger import classify_crash, log_trade, setup_trade_logger
 from trading.broker import BaseBroker, BrokerError, OrderStatus
 from trading.paper_broker import PaperBroker
 from ui.menu import MenuManager
-from data.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
-# Registry of all available algorithms
 ALGORITHM_REGISTRY: Dict[str, type] = {
     "dual_momentum":   DualMomentumAlgorithm,
     "mean_reversion":  MeanReversionAlgorithm,
     "trend_following": TrendFollowingAlgorithm,
 }
 
-# How long to wait after a recoverable crash before resuming (seconds)
 RECOVERABLE_RESTART_DELAY = 30
-
-# Maximum consecutive recoverable crashes before requiring manual confirmation
-MAX_AUTO_RECOVERIES = 3
-
-# How long to sleep between evaluation cycles when market is closed (seconds)
-MARKET_CLOSED_SLEEP = 60
+MAX_AUTO_RECOVERIES       = 3
+MARKET_CLOSED_SLEEP       = 60
 
 
 class Engine:
@@ -63,10 +57,10 @@ class Engine:
 
     def __init__(
         self,
-        display: DisplayManager,
-        led:     LEDManager,
-        state:   StateManager,
-        bus:     EventBus,
+        display:  DisplayManager,
+        led:      LEDManager,
+        state:    StateManager,
+        bus:      EventBus,
     ) -> None:
         self._display      = display
         self._led          = led
@@ -74,12 +68,17 @@ class Engine:
         self._bus          = bus
         self._trade_logger = setup_trade_logger()
         self._running      = False
-        self._shutdown_event     = threading.Event()
-        self._recovery_confirmed = threading.Event()
-        self._consecutive_recoveries = 0
-        self._lock           = threading.Lock()
-        self._last_heartbeat: float = time.monotonic()
+        self._shutdown_event          = threading.Event()
+        self._recovery_confirmed      = threading.Event()
+        self._force_evaluation_event  = threading.Event()
+        self._consecutive_recoveries  = 0
+        self._lock                    = threading.Lock()
+        self._last_heartbeat: float   = time.monotonic()
         self._heartbeat_interval: int = 300
+
+        # Settings is None until start() — methods that need it
+        # (mode/algo switch handlers) are only called after start()
+        self._settings: Optional[Settings] = None
 
         # Subsystems initialised in start()
         self._broker:      Optional[BaseBroker]        = None
@@ -111,14 +110,14 @@ class Engine:
             self._buttons     = ButtonManager(self._bus)
             self._power       = PowerManager(self._bus)
 
-            # Load persistent settings and apply saved brightness immediately
-            settings = Settings()
-            self._display.set_brightness(settings.get("display_brightness"))
-            self._led.set_brightness(settings.get("led_brightness"))
+            # Load and store settings so event handlers can access them
+            self._settings = Settings()
+            self._display.set_brightness(self._settings.get("display_brightness"))
+            self._led.set_brightness(self._settings.get("led_brightness"))
 
             self._menu = MenuManager(
                 self._bus, self._state, self._display, self._led,
-                settings=settings,    # pass settings so menu can save changes
+                settings=self._settings,
             )
 
             self._load_algorithm(starting_algo)
@@ -138,7 +137,7 @@ class Engine:
                 source="Engine"
             ))
 
-            # Register OS signal handlers here — subsystems now exist
+            # Register OS signal handlers after subsystems exist
             self._setup_os_signal_handlers()
 
             self._main_loop()
@@ -147,17 +146,14 @@ class Engine:
             reason, recoverable = classify_crash(exc)
             logger.critical("Engine failed to start: %s", reason)
             self._display.show_message("ERR START")
-            # Best-effort hardware cleanup on startup failure
             self._perform_shutdown()
             raise
 
     def _setup_os_signal_handlers(self) -> None:
-        """Register hooks to catch systemd/OS shutdown signals."""
         signal.signal(signal.SIGTERM, self._handle_os_signal)
         signal.signal(signal.SIGINT,  self._handle_os_signal)
 
     def _handle_os_signal(self, signum, frame) -> None:
-        """Callback when Linux tells this process to stop."""
         logger.info(
             "OS signal %d received — intercepting for clean hardware termination.",
             signum
@@ -165,25 +161,24 @@ class Engine:
         self._shutdown_event.set()
 
     def _main_loop(self) -> None:
-        """
-        Core event loop. Evaluates algorithms at the appropriate
-        interval when the market is open.
-        """
-        self._running = True
+        self._running    = True
         last_evaluation: float = float('-inf')
 
         while self._running:
             try:
                 snap = self._state.snapshot()
 
-                # ── Shutdown check ────────────────────────────
                 if self._shutdown_event.is_set():
                     self._perform_shutdown()
                     break
 
                 now = time.monotonic()
 
-                # ── Awaiting recovery confirmation ────────────
+                # Force immediate re-evaluation after mode or algo switch
+                if self._force_evaluation_event.is_set():
+                    self._force_evaluation_event.clear()
+                    last_evaluation = float('-inf')
+
                 if snap.system_status == SystemStatus.AWAITING_RECOVERY:
                     self._display.flash_message("CONFIRM?")
                     self._recovery_confirmed.wait(timeout=5)
@@ -192,27 +187,22 @@ class Engine:
                         self._state.clear_crash()
                         self._state.set_status(SystemStatus.RUNNING)
                         self._display.show_message("RESUMED")
-                        self._last_heartbeat = time.monotonic()
+                        self._last_heartbeat       = time.monotonic()
                         self._consecutive_recoveries = 0
                     continue
 
-                # ── Heartbeat ─────────────────────────────────
                 if snap.system_status == SystemStatus.RUNNING and (
                     now - self._last_heartbeat
                 ) >= self._heartbeat_interval:
                     logger.info("Heartbeat: Engine is healthy and running")
                     self._last_heartbeat = now
 
-                # ── Market closed ─────────────────────────────
                 if not snap.market_is_open:
                     self._state.set_status(SystemStatus.MARKET_CLOSED)
-                    # Use wait() so a shutdown signal wakes us immediately
-                    # rather than sleeping the full 60 seconds
                     if self._shutdown_event.wait(timeout=MARKET_CLOSED_SLEEP):
                         continue
                     continue
 
-                # ── Algorithm evaluation ──────────────────────
                 self._state.set_status(SystemStatus.RUNNING)
                 algo     = self._algorithm
                 interval = algo.evaluation_interval_seconds if algo else 3600
@@ -221,10 +211,8 @@ class Engine:
                     success = self._run_evaluation()
                     last_evaluation = now
                     if success:
-                        # Reset crash counter after a clean evaluation
                         self._consecutive_recoveries = 0
 
-                # Use wait() so shutdown wakes this sleep immediately
                 if self._shutdown_event.wait(timeout=1):
                     continue
 
@@ -232,10 +220,6 @@ class Engine:
                 self._handle_crash(exc)
 
     def _run_evaluation(self) -> bool:
-        """
-        Fetch data, run algorithm, execute signals.
-        Returns True if evaluation completed without errors.
-        """
         if not self._algorithm or not self._broker:
             return False
 
@@ -284,8 +268,6 @@ class Engine:
                         continue
                     self._execute_signal(sig, overview.liquid_sek, snap)
 
-            # Update P&L — separate try/except so a failure here
-            # doesn't mark the whole evaluation as failed
             try:
                 updated_overview = self._broker.get_account_overview()
                 pnl = self._calculate_pnl(updated_overview)
@@ -324,7 +306,6 @@ class Engine:
         liquid_sek: float,
         snap:       AppState,
     ) -> None:
-        """Execute a single trade signal through the broker."""
         amount_sek = round(liquid_sek * sig.fraction, 2)
         if amount_sek < 10.0:
             logger.info(
@@ -395,14 +376,9 @@ class Engine:
             self._display.show_message("EXEC ERR")
 
     def _perform_shutdown(self) -> None:
-        """
-        Gracefully close down all subsystems and clear hardware
-        before the OS cuts power.
-        """
         logger.info("Performing graceful hardware and subsystem shutdown...")
         self._running = False
 
-        # 1. Stop background tasks
         if self._scheduler:
             try: self._scheduler.stop()
             except Exception as e: logger.error("Error stopping scheduler: %s", e)
@@ -413,9 +389,6 @@ class Engine:
             try: self._power.stop()
             except Exception as e: logger.error("Error stopping power manager: %s", e)
 
-        # 2. Stop display thread then write GOODBYE directly.
-        #    LED callback fires from show_text() → LED goes off automatically
-        #    because GOODBYE maps to COLOUR_OFF in the LED colour map.
         if self._display:
             try:
                 self._display.stop_flashing()
@@ -426,8 +399,6 @@ class Engine:
             except Exception as e:
                 logger.error("Error writing goodbye to display: %s", e)
 
-        # 3. Stop LED — hardware-level guarantee it's off even if
-        #    the callback didn't fire
         if self._led:
             try:
                 self._led.stop()
@@ -479,6 +450,12 @@ class Engine:
         if new_mode == TradingMode.PAPER:
             snap = self._state.snapshot()
             self._broker = PaperBroker(snap.paper_balance or 10_000.0)
+            # Restore paper P&L from the broker's own persistent record
+            self._state.update_pnl(self._broker.get_all_time_pnl())
+            self._display.update_pnl(self._state.snapshot().current_pnl)
+            if self._settings:
+                self._settings.set("trading_mode", new_mode.value)
+
         else:
             try:
                 from trading.avanza_broker import AvanzaBroker
@@ -492,17 +469,33 @@ class Engine:
                 )
                 self._display.show_message("REAL OK")
                 logger.info("Switched to real Avanza broker")
+                # Zero P&L display until first evaluation populates it
+                # from actual Avanza account data
+                self._state.update_pnl(0.0)
+                self._display.update_pnl(0.0)
+                if self._settings:
+                    self._settings.set("trading_mode", new_mode.value)
+
             except Exception as exc:
                 logger.error("Failed to init real broker: %s", exc)
                 self._display.show_message("AUTH ERR")
-                self._state.switch_trading_mode()   # revert to paper
+                # Revert state and persist the revert
+                self._state.switch_trading_mode()
                 self._display.set_mode_char("P")
+                if self._settings:
+                    self._settings.set("trading_mode", TradingMode.PAPER.value)
+                return   # don't trigger evaluation — broker is unchanged
+
+        self._force_evaluation_event.set()
 
     def _on_algorithm_switched(self, event: Event) -> None:
         new_algo = self._state.next_algorithm()
         self._load_algorithm(new_algo)
         self._display.show_message(f"ALGO {new_algo[:8].upper()}")
         logger.info("Algorithm switched to %s", new_algo)
+        if self._settings:
+            self._settings.set("active_algorithm", new_algo)
+        self._force_evaluation_event.set()
 
     def _on_paper_reset(self, event: Event) -> None:
         if isinstance(self._broker, PaperBroker):
@@ -544,8 +537,6 @@ class Engine:
             self._display.show_message(
                 f"ERR RETRY {self._consecutive_recoveries}"
             )
-            # wait() wakes immediately if shutdown is requested
-            # rather than sleeping the full delay uninterruptibly
             self._shutdown_event.wait(timeout=RECOVERABLE_RESTART_DELAY)
             if not self._shutdown_event.is_set():
                 self._state.clear_crash()
@@ -570,17 +561,9 @@ class Engine:
         logger.info("Algorithm loaded: %s", name)
 
     def _get_required_tickers(self) -> list:
-        """
-        Return all tickers needed by the current algorithm.
-        Asks the algorithm itself if it exposes a tickers property,
-        otherwise falls back to the hardcoded registry.
-        Raises RuntimeError for unknown algorithms so misconfiguration
-        is never silently ignored.
-        """
         if self._algorithm and hasattr(self._algorithm, 'required_tickers'):
             return self._algorithm.required_tickers
 
-        # Fallback for algorithms that don't yet expose required_tickers
         from algorithms.dual_momentum import CANDIDATE_TICKERS as DM_TICKERS
         from algorithms.mean_reversion import UNIVERSE as MR_UNIVERSE
         from algorithms.trend_following import PRIMARY_TICKER, BOND_TICKER
@@ -602,7 +585,6 @@ class Engine:
         )
 
     def _calculate_pnl(self, overview) -> float:
-        """Calculate all-time P&L from account overview."""
         if isinstance(self._broker, PaperBroker):
             return self._broker.get_all_time_pnl()
         return sum(p.unrealised_pnl for p in overview.positions)
