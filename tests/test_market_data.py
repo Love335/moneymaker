@@ -255,7 +255,10 @@ def test_cache_thread_safety() -> None:
     section("TEST 6: PriceCache — Thread Safety")
     cache   = PriceCache()
     errors  = []
-    barrier = threading.Barrier(20)
+    tickers = ["A", "B", "C", "D"]
+
+    # 4 writers + 4 readers + 2 maintenance = 10 threads total
+    barrier = threading.Barrier(10)
 
     def writer(ticker: str, price: float) -> None:
         try:
@@ -275,13 +278,20 @@ def test_cache_thread_safety() -> None:
         except Exception as exc:
             errors.append(exc)
 
-    tickers = ["A", "B", "C", "D"]
+    def maintenance(fn) -> None:
+        try:
+            barrier.wait()
+            for _ in range(10):
+                fn()
+        except Exception as exc:
+            errors.append(exc)
+
     threads = []
     for ticker in tickers:
         threads.append(threading.Thread(target=writer, args=(ticker, 100.0)))
         threads.append(threading.Thread(target=reader, args=(ticker,)))
-    threads.append(threading.Thread(target=cache.clear))
-    threads.append(threading.Thread(target=cache.invalidate_stale))
+    threads.append(threading.Thread(target=maintenance, args=(cache.clear,)))
+    threads.append(threading.Thread(target=maintenance, args=(cache.invalidate_stale,)))
 
     for t in threads:
         t.start()
@@ -289,7 +299,6 @@ def test_cache_thread_safety() -> None:
         t.join()
 
     check(len(errors) == 0, f"No errors during concurrent cache access (errors: {errors})")
-
 
 # ══════════════════════════════════════════════════════════════
 #  TEST 7 — Price validation

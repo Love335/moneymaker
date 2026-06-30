@@ -51,6 +51,7 @@ class DisplayManager:
     """
     def __init__(self) -> None:
         self._seg:             Optional[sevensegment] = None
+        self._device           = None                          # keep reference for brightness
         self._queue:           queue.Queue            = queue.Queue()
         self._running:         bool                   = False
         self._thread:          Optional[threading.Thread] = None
@@ -81,16 +82,22 @@ class DisplayManager:
             except Exception as exc:
                 logger.error("DisplayManager: LED callback error: %s", exc)
             
-    def start(self) -> None:
+    def start(self, brightness: int = 128) -> None:
         """Initialise hardware and start display thread."""
         try:
-            serial     = spi(port=0, device=0, gpio=noop())
-            device     = max7219(serial, cascaded=1, block_orientation=0, rotate=0)
-            self._seg  = sevensegment(device)
-            logger.info("DisplayManager: MAX7219 initialised")
+            serial        = spi(port=0, device=0, gpio=noop())
+            self._device  = max7219(
+                serial, cascaded=1, block_orientation=0, rotate=0
+            )
+            self._device.contrast(brightness)
+            self._seg     = sevensegment(self._device)
+            logger.info(
+                "DisplayManager: MAX7219 initialised (brightness=%d)", brightness
+            )
         except Exception as exc:
             logger.error("DisplayManager: failed to init display: %s", exc)
-            self._seg = None
+            self._seg    = None
+            self._device = None
 
         self._running = True
         self._thread  = threading.Thread(
@@ -126,6 +133,23 @@ class DisplayManager:
         """Update the P&L value shown in idle state."""
         with self._lock:
             self._current_pnl = pnl
+
+    def set_brightness(self, value: int) -> None:
+        """
+        Set display brightness/contrast (0–255).
+        Takes effect immediately without restarting.
+        """
+        value = max(0, min(255, int(value)))
+        if self._device is not None:
+            try:
+                self._device.contrast(value)
+                logger.info("DisplayManager: brightness set to %d", value)
+            except Exception as exc:
+                logger.error("DisplayManager: failed to set brightness: %s", exc)
+        else:
+            logger.warning(
+                "DisplayManager: set_brightness called but device not initialised"
+            )
 
     def set_mode_char(self, char: str) -> None:
         """Set the mode indicator character ('P' for paper, 'R' for real)."""

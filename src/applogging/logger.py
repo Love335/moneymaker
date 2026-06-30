@@ -11,7 +11,6 @@ auto-recover or wait for manual confirmation.
 
 import logging
 import logging.handlers
-import os
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -32,10 +31,16 @@ def setup_logging(level: int = logging.INFO) -> None:
     """
     Configure root logger with console and rotating file handlers.
     Call once at application startup before any other imports.
+    Safe to call multiple times — subsequent calls are no-ops.
     """
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
     root = logging.getLogger()
+
+    # Guard against duplicate handlers if called more than once
+    # (e.g. during testing or after a soft restart)
+    if root.handlers:
+        return
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     root.setLevel(logging.DEBUG)   # capture everything; handlers filter
 
     formatter = logging.Formatter(
@@ -67,10 +72,15 @@ def setup_trade_logger() -> logging.Logger:
     """
     Return a dedicated logger for trade records.
     Writes to trades.log independently of the main log.
+    Safe to call multiple times — handlers are only added once.
     """
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
     trade_logger = logging.getLogger("trades")
+
+    # Guard against duplicate handlers if called more than once
+    if trade_logger.handlers:
+        return trade_logger
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
     trade_logger.setLevel(logging.INFO)
     trade_logger.propagate = False   # don't also write to app.log
 
@@ -132,54 +142,71 @@ def classify_crash(exc: BaseException) -> tuple[str, bool]:
 
     Recoverable crashes auto-restart trading after a delay.
     Unrecoverable crashes require manual confirmation via YES button.
+
+    Classification order:
+      1. Unrecoverable message fragments (most specific, checked first)
+      2. Known recoverable exception types
+      3. Recoverable message fragments
+      4. Unknown — treated as unrecoverable to be safe
     """
     exc_type = type(exc).__name__
     exc_msg  = str(exc).lower()
     tb       = traceback.format_exc()
 
-    from trading.broker import BrokerError
-    if isinstance(exc, BrokerError) and any(
-        f in str(exc).lower() for f in UNRECOVERABLE_MESSAGE_FRAGMENTS
-    ):
-        return f"BrokerError: {exc} [unrecoverable]", False
-
-    # Explicit unrecoverable checks first
+    # Unrecoverable fragment check applies to all exception types
+    # including BrokerError — checked first so it takes priority
     for fragment in UNRECOVERABLE_MESSAGE_FRAGMENTS:
         if fragment in exc_msg:
-            reason = f"{exc_type}: {exc} [unrecoverable: matched '{fragment}']"
+            reason = (
+                f"{exc_type}: {exc} "
+                f"[unrecoverable: matched '{fragment}']"
+            )
             return reason, False
 
-    # Explicit recoverable checks
+    # Known transient exception types
     if isinstance(exc, RECOVERABLE_EXCEPTION_TYPES):
         reason = f"{exc_type}: {exc} [recoverable: known transient type]"
         return reason, True
 
+    # Recoverable message fragments
     for fragment in RECOVERABLE_MESSAGE_FRAGMENTS:
         if fragment in exc_msg:
             reason = f"{exc_type}: {exc} [recoverable: matched '{fragment}']"
             return reason, True
 
-    # Unknown exception — treat as unrecoverable to be safe
-    reason = f"{exc_type}: {exc} [unrecoverable: unknown exception type]\n{tb}"
+    # Unknown — unrecoverable by default
+    reason = (
+        f"{exc_type}: {exc} "
+        f"[unrecoverable: unknown exception type]\n{tb}"
+    )
     return reason, False
 
 
 def log_trade(
     trade_logger: logging.Logger,
-    action: str,
-    ticker: str,
-    amount: float,
-    price: float,
-    mode: str,
+    action:    str,
+    ticker:    str,
+    amount:    float,
+    price:     float,
+    mode:      str,
     algorithm: str,
-    result: str,
-    notes: Optional[str] = None
+    result:    str,
+    notes:     Optional[str] = None,
 ) -> None:
     """
     Write a structured trade record to trades.log.
 
     All fields are mandatory except notes.
+    Falls back to root logger warning if trade_logger has no handlers,
+    so trade records are never silently lost.
     """
+    if not trade_logger.handlers:
+        logging.warning(
+            "log_trade() called but trade logger has no handlers — "
+            "trade will be logged to root logger only. "
+            "Call setup_trade_logger() at startup."
+        )
+
     note_str = f" | {notes}" if notes else ""
     trade_logger.info(
         "ACTION=%s | TICKER=%s | AMOUNT=%.2f SEK | PRICE=%.4f"

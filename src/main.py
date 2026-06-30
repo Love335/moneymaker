@@ -37,16 +37,17 @@ def main() -> None:
     validate_config_file_permissions()
 
     # ── Core infrastructure ───────────────────────────────────
+    settings = Settings()
     bus     = EventBus()
     state   = StateManager()
     display = DisplayManager()
     led     = LEDManager()
 
     bus.start()
-    display.start()
-    led.start()
-    display.set_led_callback(led.on_display_update) z
-
+    display.start(brightness=settings.get("display_brightness"))
+    led.start(brightness=settings.get("led_brightness"))
+    display.set_led_callback(led.on_display_update)
+    
     try:
         # ── Paper trading setup ───────────────────────────────
         # Check if this is a fresh paper portfolio

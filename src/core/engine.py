@@ -31,6 +31,7 @@ from applogging.logger import classify_crash, log_trade, setup_trade_logger
 from trading.broker import BaseBroker, BrokerError, OrderStatus
 from trading.paper_broker import PaperBroker
 from ui.menu import MenuManager
+from data.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +99,6 @@ class Engine:
         broker:        BaseBroker,
         starting_algo: str = "dual_momentum",
     ) -> None:
-        """
-        Initialise all subsystems and enter the main loop.
-        This method blocks until shutdown is requested.
-        """
         import config
 
         logger.info("Engine starting")
@@ -113,8 +110,15 @@ class Engine:
             self._scheduler   = MarketScheduler(self._bus)
             self._buttons     = ButtonManager(self._bus)
             self._power       = PowerManager(self._bus)
-            self._menu        = MenuManager(
-                self._bus, self._state, self._display, self._led
+
+            # Load persistent settings and apply saved brightness immediately
+            settings = Settings()
+            self._display.set_brightness(settings.get("display_brightness"))
+            self._led.set_brightness(settings.get("led_brightness"))
+
+            self._menu = MenuManager(
+                self._bus, self._state, self._display, self._led,
+                settings=settings,    # pass settings so menu can save changes
             )
 
             self._load_algorithm(starting_algo)
@@ -484,7 +488,7 @@ class Engine:
                     username=creds.username,
                     password=creds.password,
                     totp_secret=creds.totp_secret,
-                    account_id="3525815",
+                    account_id=creds.account_id,
                 )
                 self._display.show_message("REAL OK")
                 logger.info("Switched to real Avanza broker")

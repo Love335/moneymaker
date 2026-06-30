@@ -6,6 +6,7 @@
 AVANZA_USERNAME    = "your_username_here"
 AVANZA_PASSWORD    = "your_password_here"
 AVANZA_TOTP_SECRET = "your_totp_secret_here"
+AVANZA_ACCOUNT_ID =  "your_account_id_here"
 
 # ── Optional: Telegram alerts ─────────────────────────────────
 # Leave as None to disable Telegram notifications

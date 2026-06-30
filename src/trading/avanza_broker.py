@@ -36,9 +36,6 @@ from trading import tickers as ticker_registry
 
 logger = logging.getLogger(__name__)
 
-# ISK account ID
-ACCOUNT_ID = "3525815"
-
 # How long a placed order remains valid (days)
 ORDER_VALID_DAYS = 1
 
@@ -88,7 +85,7 @@ class AvanzaBroker(BaseBroker):
         username:    str,
         password:    str,
         totp_secret: str,
-        account_id:  str = ACCOUNT_ID,
+        account_id:  str,
     ) -> None:
         self._username    = username
         self._password    = password

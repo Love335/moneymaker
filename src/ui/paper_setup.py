@@ -1,8 +1,11 @@
 """
 paper_setup.py — Balance selector shown on first fresh paper trading start.
+
 Cycles through balance options using the mode button.
 YES confirms, NO cancels and uses the default.
+Times out after MAX_WAIT_SECONDS and uses the default if no input received.
 """
+
 import logging
 import time
 import threading
@@ -14,18 +17,22 @@ from hardware.led import LEDManager
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BALANCE = 10_000.0
-BALANCE_STEP    =  1_000.0
-BALANCE_MIN     =  1_000.0
-BALANCE_MAX     = 100_000.0
+DEFAULT_BALANCE  = 10_000.0
+BALANCE_STEP     =  1_000.0
+BALANCE_MIN      =  1_000.0
+BALANCE_MAX      = 100_000.0
+MAX_WAIT_SECONDS =    300.0   # fall back to default if no input for 5 minutes
 
 
 class PaperBalanceSelector:
     """
     Interactive balance selector using physical buttons.
-    Mode button → increment balance by 1,000 SEK
+
+    Mode button → increment balance by BALANCE_STEP (wraps at BALANCE_MAX)
     YES button  → confirm selection
     NO button   → cancel (use default)
+
+    If no input is received within MAX_WAIT_SECONDS, returns DEFAULT_BALANCE.
     """
 
     def __init__(
@@ -44,7 +51,7 @@ class PaperBalanceSelector:
 
     def run(self) -> float:
         """
-        Block until user confirms or cancels.
+        Block until the user confirms, cancels, or the timeout expires.
         Returns the selected balance in SEK.
         """
         # Subscribe before showing message so no button press is missed
@@ -52,10 +59,21 @@ class PaperBalanceSelector:
         self._bus.subscribe(EventType.BUTTON_YES_PRESSED,  self._on_yes)
         self._bus.subscribe(EventType.BUTTON_NO_PRESSED,   self._on_no)
 
-        self._display.show_message("SET BAL")  # LED follows via callback
+        self._display.show_message("SET BAL")
         self._show_balance()
 
-        while not self._confirmed.is_set() and not self._cancelled.is_set():
+        deadline = time.monotonic() + MAX_WAIT_SECONDS
+        while (
+            not self._confirmed.is_set()
+            and not self._cancelled.is_set()
+        ):
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "Balance selection timed out after %.0fs — "
+                    "using default %.2f SEK",
+                    MAX_WAIT_SECONDS, DEFAULT_BALANCE
+                )
+                break
             time.sleep(0.1)
 
         self._bus.unsubscribe(EventType.BUTTON_MODE_PRESSED, self._on_mode)
@@ -69,13 +87,17 @@ class PaperBalanceSelector:
             )
             return DEFAULT_BALANCE
 
-        logger.info("Balance confirmed: %.2f SEK", self._balance)
-        return self._balance
+        if self._confirmed.is_set():
+            logger.info("Balance confirmed: %.2f SEK", self._balance)
+            return self._balance
+
+        # Timeout fallback
+        return DEFAULT_BALANCE
 
     def _on_mode(self, event: Event) -> None:
         self._balance += BALANCE_STEP
         if self._balance > BALANCE_MAX:
-            self._balance = BALANCE_MIN   # wrap around
+            self._balance = BALANCE_MIN   # wrap around to minimum
         self._show_balance()
 
     def _on_yes(self, event: Event) -> None:

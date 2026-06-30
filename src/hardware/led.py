@@ -83,18 +83,39 @@ class LEDManager:
         self._pixel = None
         self._lock  = threading.Lock()
 
-    def start(self) -> None:
+    def start(self, brightness: float = 0.3) -> None:
         """Initialise hardware."""
         try:
             import board
             import neopixel
             self._pixel = neopixel.NeoPixel(
-                board.D18, 1, brightness=0.3, auto_write=True
+                board.D18, 1, brightness=brightness, auto_write=True
             )
-            logger.info("LEDManager: WS2812D initialised on GPIO 18")
+            logger.info(
+                "LEDManager: WS2812D initialised on GPIO 18 (brightness=%.2f)",
+                brightness
+            )
         except Exception as exc:
             logger.error("LEDManager: failed to init LED: %s", exc)
             self._pixel = None
+
+    def set_brightness(self, value: float) -> None:
+        """
+        Set LED brightness (0.0–1.0).
+        Takes effect immediately — the next colour write will use
+        the new brightness.
+        """
+        value = max(0.0, min(1.0, float(value)))
+        if self._pixel is not None:
+            try:
+                self._pixel.brightness = value
+                logger.info("LEDManager: brightness set to %.2f", value)
+            except Exception as exc:
+                logger.error("LEDManager: failed to set brightness: %s", exc)
+        else:
+            logger.warning(
+                "LEDManager: set_brightness called but pixel not initialised"
+            )
 
     def stop(self) -> None:
         """Turn off LED."""

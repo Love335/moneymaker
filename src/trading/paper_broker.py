@@ -36,11 +36,16 @@ class PaperBroker(BaseBroker):
     Portfolio state is persisted to JSON after every change.
     """
 
-    def __init__(self, starting_balance: float = 10_000.0) -> None:
-        self._lock = threading.Lock()
+    def __init__(
+        self,
+        starting_balance: float = 10_000.0,
+        portfolio_file:   Optional[Path] = None,
+    ) -> None:
+        self._lock             = threading.Lock()
         self._starting_balance = starting_balance
-        self._state = self._load_or_init(starting_balance)
-        self._price_store: dict = {}
+        self._portfolio_file   = portfolio_file or PORTFOLIO_FILE
+        self._state            = self._load_or_init(starting_balance)
+        self._price_store:     dict = {}
         logger.info(
             "PaperBroker initialised. Balance: %.2f SEK. Positions: %d",
             self._state["liquid_sek"],
@@ -73,27 +78,30 @@ class PaperBroker(BaseBroker):
 
     def get_price(self, ticker: str) -> float:
         """
-        Returns last known price from portfolio state.
-        In real use, the engine updates prices via market_data.py
-        before calling evaluate().
+        Return last known price for ticker.
+        Checks price_store first (updated by engine via update_price()),
+        then falls back to the position's stored price.
+        Raises BrokerError if no price is available at all.
         """
         with self._lock:
-            for p in self._state["positions"]:
-                if p["ticker"] == ticker:
-                    return p.get("current_price", p["average_price"])
-        raise BrokerError(f"No price available for {ticker} in paper state")
+            price = self._get_current_price_locked(ticker)
+            if price is not None and price > 0:
+                return price
+        raise BrokerError(
+            f"No price available for {ticker}. "
+            f"Call update_price() before placing orders."
+        )
 
     def place_order(
         self,
-        ticker: str,
-        action: str,
+        ticker:     str,
+        action:     str,
         amount_sek: float,
     ) -> OrderResult:
         with self._lock:
             return self._execute(ticker, action, amount_sek)
 
     def cancel_all_orders(self) -> bool:
-        # Paper broker has no open orders — always succeeds
         logger.info("PaperBroker: cancel_all_orders called (no-op)")
         return True
 
@@ -103,7 +111,7 @@ class PaperBroker(BaseBroker):
     # ── Paper-specific methods ────────────────────────────────
 
     def update_price(self, ticker: str, price: float) -> None:
-        """Update the current price for a held position."""
+        """Update the current price for a ticker."""
         with self._lock:
             self._price_store[ticker] = price
             for p in self._state["positions"]:
@@ -115,6 +123,7 @@ class PaperBroker(BaseBroker):
         """Wipe all positions and reset cash to starting_balance."""
         with self._lock:
             self._starting_balance = starting_balance
+            self._price_store.clear()
             self._state = self._fresh_state(starting_balance)
             self._save()
         logger.info(
@@ -124,15 +133,21 @@ class PaperBroker(BaseBroker):
     def get_all_time_pnl(self) -> float:
         """Return total realised + unrealised P&L since last reset."""
         with self._lock:
-            return round(self._state.get("realised_pnl", 0.0) + self._unrealised(), 2)
+            return round(
+                self._state.get("realised_pnl", 0.0) + self._unrealised(), 2
+            )
 
     # ── Internal ──────────────────────────────────────────────
 
-    def _execute(self, ticker: str, action: str, amount_sek: float) -> OrderResult:
+    def _execute(
+        self, ticker: str, action: str, amount_sek: float
+    ) -> OrderResult:
         """Core execution logic. Must be called within lock."""
         price = self._get_current_price_locked(ticker)
         if price is None or price <= 0:
-            logger.error("PaperBroker: cannot execute — no price for %s", ticker)
+            logger.error(
+                "PaperBroker: cannot execute — no price for %s", ticker
+            )
             return OrderResult(
                 status=OrderStatus.REJECTED,
                 ticker=ticker,
@@ -174,18 +189,19 @@ class PaperBroker(BaseBroker):
         quantity = amount_sek / price
         self._state["liquid_sek"] -= amount_sek
 
-        # Add to or average into existing position
         existing = next(
-            (p for p in self._state["positions"] if p["ticker"] == ticker), None
+            (p for p in self._state["positions"] if p["ticker"] == ticker),
+            None
         )
         if existing:
-            total_qty   = existing["quantity"] + quantity
-            avg_price   = (
-                (existing["quantity"] * existing["average_price"] + amount_sek)
-                / total_qty
-            )
-            existing["quantity"]      = total_qty
-            existing["average_price"] = avg_price
+            old_qty   = existing["quantity"]
+            old_avg   = existing["average_price"]
+            new_qty   = old_qty + quantity
+            # Correct weighted average:
+            # (old_cost + new_cost) / total_quantity
+            new_avg   = (old_qty * old_avg + quantity * price) / new_qty
+            existing["quantity"]      = new_qty
+            existing["average_price"] = new_avg
             existing["current_price"] = price
         else:
             self._state["positions"].append({
@@ -212,7 +228,8 @@ class PaperBroker(BaseBroker):
         self, ticker: str, amount_sek: float, price: float
     ) -> OrderResult:
         existing = next(
-            (p for p in self._state["positions"] if p["ticker"] == ticker), None
+            (p for p in self._state["positions"] if p["ticker"] == ticker),
+            None
         )
         if not existing or existing["quantity"] <= 0:
             return OrderResult(
@@ -223,15 +240,16 @@ class PaperBroker(BaseBroker):
                 error_message=f"No position in {ticker} to sell",
             )
 
-        quantity    = existing["quantity"]   # sell entire position
-        proceeds    = quantity * price
-        cost_basis  = quantity * existing["average_price"]
-        trade_pnl   = proceeds - cost_basis
+        quantity   = existing["quantity"]
+        proceeds   = quantity * price
+        cost_basis = quantity * existing["average_price"]
+        trade_pnl  = proceeds - cost_basis
 
-        self._state["liquid_sek"]      += proceeds
-        self._state["realised_pnl"]    += trade_pnl
-        self._state["positions"]        = [
-            p for p in self._state["positions"] if p["ticker"] != ticker
+        self._state["liquid_sek"]   += proceeds
+        self._state["realised_pnl"] += trade_pnl
+        self._state["positions"]     = [
+            p for p in self._state["positions"]
+            if p["ticker"] != ticker
         ]
 
         self._save()
@@ -248,6 +266,7 @@ class PaperBroker(BaseBroker):
         )
 
     def _get_current_price_locked(self, ticker: str) -> Optional[float]:
+        """Return best known price for ticker. Must be called within lock."""
         if ticker in self._price_store:
             return self._price_store[ticker]
         for p in self._state["positions"]:
@@ -256,10 +275,11 @@ class PaperBroker(BaseBroker):
         return None
 
     def _unrealised(self) -> float:
+        """Sum of unrealised P&L across all positions. Call within lock."""
         total = 0.0
         for p in self._state["positions"]:
-            total += (p.get("current_price", p["average_price"]) - p["average_price"]) \
-                     * p["quantity"]
+            current = p.get("current_price", p["average_price"])
+            total  += (current - p["average_price"]) * p["quantity"]
         return total
 
     def _fresh_state(self, balance: float) -> dict:
@@ -271,14 +291,16 @@ class PaperBroker(BaseBroker):
         }
 
     def _load_or_init(self, starting_balance: float) -> dict:
-        PORTFOLIO_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if PORTFOLIO_FILE.exists():
+        self._portfolio_file.parent.mkdir(parents=True, exist_ok=True)
+        if self._portfolio_file.exists():
             try:
-                with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+                with open(self._portfolio_file, "r", encoding="utf-8") as f:
                     state = json.load(f)
+                # Ensure realised_pnl key exists in older portfolio files
+                state.setdefault("realised_pnl", 0.0)
                 logger.info(
                     "PaperBroker: loaded existing portfolio from %s",
-                    PORTFOLIO_FILE
+                    self._portfolio_file
                 )
                 return state
             except (json.JSONDecodeError, KeyError) as exc:
@@ -294,11 +316,13 @@ class PaperBroker(BaseBroker):
         self._save_state(self._state)
 
     def _save_state(self, state: dict) -> None:
-        PORTFOLIO_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = PORTFOLIO_FILE.with_suffix(".tmp")
+        self._portfolio_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._portfolio_file.with_suffix(".tmp")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2)
-            tmp.replace(PORTFOLIO_FILE)   # atomic rename
+            tmp.replace(self._portfolio_file)   # atomic rename
         except OSError as exc:
-            logger.error("PaperBroker: failed to save portfolio: %s", exc)
+            logger.error(
+                "PaperBroker: failed to save portfolio: %s", exc
+            )
