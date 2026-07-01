@@ -19,6 +19,7 @@ The bot defaults to paper trading on every startup.
 import logging
 import threading
 import time
+import math
 from datetime import date, timedelta
 from typing import Optional
 
@@ -313,7 +314,8 @@ class AvanzaBroker(BaseBroker):
                 if price <= 0:
                     raise BrokerError(f"Invalid price {price} for {ticker}")
 
-                quantity = round(amount_sek / price, 4)
+                quantity = math.floor(amount_sek / price)
+
                 if quantity <= 0:
                     return OrderResult(
                         status=OrderStatus.REJECTED,
@@ -322,7 +324,10 @@ class AvanzaBroker(BaseBroker):
                         quantity=0,
                         executed_price=price,
                         total_sek=0,
-                        error_message="Calculated quantity is zero",
+                        error_message=(
+                            f"Calculated quantity is zero after rounding to whole lot "
+                            f"(amount={amount_sek:.2f} SEK, price={price:.2f} SEK)"
+                        ),
                     )
 
                 order_type  = OrderType.BUY if action == "BUY" else OrderType.SELL
