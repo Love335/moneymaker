@@ -76,11 +76,8 @@ class Engine:
         self._last_heartbeat: float   = time.monotonic()
         self._heartbeat_interval: int = 300
 
-        # Settings is None until start() — methods that need it
-        # (mode/algo switch handlers) are only called after start()
         self._settings: Optional[Settings] = None
 
-        # Subsystems initialised in start()
         self._broker:      Optional[BaseBroker]        = None
         self._algorithm:   Optional[BaseAlgorithm]     = None
         self._market_data: Optional[MarketDataService] = None
@@ -110,7 +107,6 @@ class Engine:
             self._buttons     = ButtonManager(self._bus)
             self._power       = PowerManager(self._bus)
 
-            # Load and store settings so event handlers can access them
             self._settings = Settings()
             self._display.set_brightness(self._settings.get("display_brightness"))
             self._led.set_brightness(self._settings.get("led_brightness"))
@@ -137,9 +133,7 @@ class Engine:
                 source="Engine"
             ))
 
-            # Register OS signal handlers after subsystems exist
             self._setup_os_signal_handlers()
-
             self._main_loop()
 
         except Exception as exc:
@@ -174,7 +168,6 @@ class Engine:
 
                 now = time.monotonic()
 
-                # Force immediate re-evaluation after mode or algo switch
                 if self._force_evaluation_event.is_set():
                     self._force_evaluation_event.clear()
                     last_evaluation = float('-inf')
@@ -187,7 +180,7 @@ class Engine:
                         self._state.clear_crash()
                         self._state.set_status(SystemStatus.RUNNING)
                         self._display.show_message("RESUMED")
-                        self._last_heartbeat       = time.monotonic()
+                        self._last_heartbeat         = time.monotonic()
                         self._consecutive_recoveries = 0
                     continue
 
@@ -263,11 +256,34 @@ class Engine:
                 logger.info("Evaluation: no trade signals generated")
                 self._display.show_message("NO SIGNAL")
             else:
-                for sig in signals:
-                    if sig.action == TradeAction.HOLD:
-                        continue
+                # Split signals into sells and buys and execute sells first.
+                # This ensures the broker has freed up cash before we
+                # calculate buy sizes, preventing orders being sized against
+                # a pre-sell balance and rejected for insufficient funds.
+                sell_signals = [s for s in signals if s.action == TradeAction.SELL]
+                buy_signals  = [s for s in signals if s.action == TradeAction.BUY]
+
+                for sig in sell_signals:
                     self._execute_signal(sig, overview.liquid_sek, snap)
 
+                # Re-fetch account state so buy sizing uses post-sell balance
+                if sell_signals:
+                    try:
+                        overview = self._broker.get_account_overview()
+                        logger.info(
+                            "Evaluation: post-sell liquid balance: %.2f SEK",
+                            overview.liquid_sek
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Evaluation: failed to refresh overview "
+                            "after sells: %s", exc
+                        )
+
+                for sig in buy_signals:
+                    self._execute_signal(sig, overview.liquid_sek, snap)
+
+            # Update P&L after all trades are complete
             try:
                 updated_overview = self._broker.get_account_overview()
                 pnl = self._calculate_pnl(updated_overview)
@@ -306,23 +322,37 @@ class Engine:
         liquid_sek: float,
         snap:       AppState,
     ) -> None:
-        amount_sek = round(liquid_sek * sig.fraction, 2)
-        if amount_sek < 10.0:
-            logger.info(
-                "Signal for %s: amount %.2f SEK too small, skipping",
-                sig.ticker, amount_sek
-            )
-            return
+        """Execute a single trade signal through the broker."""
+        # For SELL signals the amount is the full position value,
+        # not a fraction of liquid cash — the broker sells everything held.
+        # We still pass liquid_sek * fraction for BUY sizing, but for SELLs
+        # the broker ignores amount_sek and sells the full position anyway.
+        if sig.action == TradeAction.SELL:
+            # Pass a nominal amount — paper and real brokers both sell
+            # the entire held position regardless of this value
+            amount_sek = 0.0
+        else:
+            amount_sek = round(liquid_sek * sig.fraction, 2)
+            if amount_sek < 10.0:
+                logger.info(
+                    "Signal for %s: amount %.2f SEK too small, skipping",
+                    sig.ticker, amount_sek
+                )
+                return
 
         action_str = sig.action.value
         logger.info(
-            "Executing: %s %s %.2f SEK (algo=%s confidence=%.2f)",
-            action_str, sig.ticker, amount_sek,
+            "Executing: %s %s (algo=%s confidence=%.2f)",
+            action_str, sig.ticker,
             sig.algorithm, sig.confidence
         )
-        self._display.show_message(
-            f"{action_str} {sig.ticker[:5]} {amount_sek:.0f}SEK"
-        )
+
+        if sig.action != TradeAction.SELL:
+            self._display.show_message(
+                f"{action_str} {sig.ticker[:5]} {amount_sek:.0f}SEK"
+            )
+        else:
+            self._display.show_message(f"SELL {sig.ticker[:5]}")
 
         try:
             result = self._broker.place_order(
@@ -337,7 +367,7 @@ class Engine:
                 trade_logger=self._trade_logger,
                 action=action_str,
                 ticker=sig.ticker,
-                amount=amount_sek,
+                amount=result.total_sek,
                 price=result.executed_price,
                 mode=snap.trading_mode.value,
                 algorithm=sig.algorithm,
@@ -355,7 +385,7 @@ class Engine:
                     payload={
                         "ticker": sig.ticker,
                         "action": action_str,
-                        "amount": amount_sek,
+                        "amount": result.total_sek,
                         "price":  result.executed_price,
                     }
                 ))
@@ -450,7 +480,6 @@ class Engine:
         if new_mode == TradingMode.PAPER:
             snap = self._state.snapshot()
             self._broker = PaperBroker(snap.paper_balance or 10_000.0)
-            # Restore paper P&L from the broker's own persistent record
             self._state.update_pnl(self._broker.get_all_time_pnl())
             self._display.update_pnl(self._state.snapshot().current_pnl)
             if self._settings:
@@ -469,8 +498,6 @@ class Engine:
                 )
                 self._display.show_message("REAL OK")
                 logger.info("Switched to real Avanza broker")
-                # Zero P&L display until first evaluation populates it
-                # from actual Avanza account data
                 self._state.update_pnl(0.0)
                 self._display.update_pnl(0.0)
                 if self._settings:
@@ -479,12 +506,11 @@ class Engine:
             except Exception as exc:
                 logger.error("Failed to init real broker: %s", exc)
                 self._display.show_message("AUTH ERR")
-                # Revert state and persist the revert
                 self._state.switch_trading_mode()
                 self._display.set_mode_char("P")
                 if self._settings:
                     self._settings.set("trading_mode", TradingMode.PAPER.value)
-                return   # don't trigger evaluation — broker is unchanged
+                return
 
         self._force_evaluation_event.set()
 

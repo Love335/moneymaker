@@ -84,35 +84,54 @@ class DualMomentumAlgorithm(BaseAlgorithm):
             winners = [t for t, s in ranked[:n_assets] if s >= threshold]
 
             if not winners:
+                winners = [SAFE_HAVEN_TICKER]
+                reason  = f"No asset beats {threshold:.0%} threshold; safe haven"
                 logger.info(
                     "DualMomentum: no asset clears %.1f%% threshold — "
                     "routing to safe haven %s",
                     threshold * 100, SAFE_HAVEN_TICKER,
                 )
-                signals.append(TradeSignal(
-                    ticker=SAFE_HAVEN_TICKER,
-                    action=TradeAction.BUY,
-                    fraction=1.0,
-                    confidence=0.9,
-                    reason=f"No asset beats {threshold:.0%} threshold",
-                    algorithm=self.name,
-                ))
             else:
-                fraction_each = round(1.0 / len(winners), 3)
-                for ticker in winners:
-                    score = scores[ticker]
-                    logger.info(
-                        "DualMomentum: BUY %s score=%.1f%% fraction=%.0f%%",
-                        ticker, score * 100, fraction_each * 100,
-                    )
+                reason = None
+
+            # Sell anything currently held that is not in the winner list.
+            # We can identify held assets because their price was passed in.
+            # The engine passes prices for all tickers it fetched — if a
+            # candidate ticker has a price, the broker may be holding it.
+            # Sell signals must come BEFORE buy signals so the engine
+            # executes them first and frees up cash.
+            for ticker in CANDIDATE_TICKERS:
+                if ticker not in winners and ticker in snapshot.prices:
+                    # Only signal a sell if we might actually hold it —
+                    # the broker will reject silently if we don't
                     signals.append(TradeSignal(
                         ticker=ticker,
-                        action=TradeAction.BUY,
-                        fraction=fraction_each,
-                        confidence=min(score / 0.3, 1.0),
-                        reason=f"12-1mo return {score:.1%} beats threshold",
+                        action=TradeAction.SELL,
+                        fraction=1.0,
+                        confidence=0.95,
+                        reason=f"Rotating out — {ticker} no longer a winner",
                         algorithm=self.name,
                     ))
+
+            # Now signal buys for the winners
+            fraction_each = round(1.0 / len(winners), 3)
+            for ticker in winners:
+                score = scores.get(ticker)
+                sig_reason = reason or f"12-1mo return {score:.1%} beats threshold"
+                logger.info(
+                    "DualMomentum: BUY %s score=%s fraction=%.0f%%",
+                    ticker,
+                    f"{score:.1%}" if score is not None else "safe haven",
+                    fraction_each * 100,
+                )
+                signals.append(TradeSignal(
+                    ticker=ticker,
+                    action=TradeAction.BUY,
+                    fraction=fraction_each,
+                    confidence=min(score / 0.3, 1.0) if score else 0.9,
+                    reason=sig_reason,
+                    algorithm=self.name,
+                ))
 
         except Exception:
             logger.exception("DualMomentum: unexpected error during evaluation")

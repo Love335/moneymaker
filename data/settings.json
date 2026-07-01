@@ -2,5 +2,5 @@
   "display_brightness": 128,
   "led_brightness": 0.5,
   "trading_mode": "REAL",
-  "active_algorithm": "dual_momentum"
+  "active_algorithm": "mean_reversion"
 }
