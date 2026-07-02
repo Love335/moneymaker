@@ -33,12 +33,13 @@ class Instrument:
     """
     Represents a single tradeable instrument.
 
-    yf_ticker:       Yahoo Finance symbol — used for price data
-    avanza_id:       Avanza orderbook ID — used for real trading
-                     None means paper trading only
-    name:            Human-readable name for logs and display
-    asset_class:     Classification for risk and portfolio management
+    yf_ticker:        Yahoo Finance symbol — used for price data
+    avanza_id:        Avanza orderbook ID — used for real trading
+                      None means paper trading only
+    name:             Human-readable name for logs and display
+    asset_class:      Classification for risk and portfolio management
     avanza_tradeable: True if this instrument can be traded on Avanza ISK
+                      Automatically set to False if avanza_id is None.
     """
     yf_ticker:        str
     avanza_id:        Optional[str]
@@ -48,7 +49,6 @@ class Instrument:
 
     def __post_init__(self) -> None:
         if self.avanza_tradeable and self.avanza_id is None:
-            # Use object.__setattr__ because dataclass is frozen
             object.__setattr__(self, "avanza_tradeable", False)
 
 
@@ -59,21 +59,11 @@ class Instrument:
 REGISTRY: dict[str, Instrument] = {
 
     # ── Swedish large-cap stocks (OMXS30 components) ──────────
-    "ERIC-B.ST": Instrument(
-        yf_ticker="ERIC-B.ST", avanza_id="5240",
-        name="Ericsson B", asset_class=AssetClass.EQUITY,
-    ),
+
+    # Industrials
     "VOLV-B.ST": Instrument(
         yf_ticker="VOLV-B.ST", avanza_id="5269",
         name="Volvo B", asset_class=AssetClass.EQUITY,
-    ),
-    "SEB-A.ST": Instrument(
-        yf_ticker="SEB-A.ST", avanza_id="5255",
-        name="SEB A", asset_class=AssetClass.EQUITY,
-    ),
-    "INVE-B.ST": Instrument(
-        yf_ticker="INVE-B.ST", avanza_id="5247",
-        name="Investor B", asset_class=AssetClass.EQUITY,
     ),
     "SAND.ST": Instrument(
         yf_ticker="SAND.ST", avanza_id="5471",
@@ -83,13 +73,77 @@ REGISTRY: dict[str, Instrument] = {
         yf_ticker="ATCO-A.ST", avanza_id="5234",
         name="Atlas Copco A", asset_class=AssetClass.EQUITY,
     ),
+    "ABB.ST": Instrument(
+        yf_ticker="ABB.ST", avanza_id="5447",
+        name="ABB Ltd", asset_class=AssetClass.EQUITY,
+    ),
+    "ALFA.ST": Instrument(
+        yf_ticker="ALFA.ST", avanza_id="5580",
+        name="Alfa Laval", asset_class=AssetClass.EQUITY,
+    ),
+    "SKF-B.ST": Instrument(
+        yf_ticker="SKF-B.ST", avanza_id="5265",
+        name="SKF B", asset_class=AssetClass.EQUITY,
+    ),
+    "HEXA-B.ST": Instrument(
+        yf_ticker="HEXA-B.ST", avanza_id="5236",
+        name="Hexagon B", asset_class=AssetClass.EQUITY,
+    ),
+    "BOL.ST": Instrument(
+        yf_ticker="BOL.ST", avanza_id="5564",
+        name="Boliden", asset_class=AssetClass.EQUITY,
+    ),
+
+    # Financials
+    "SEB-A.ST": Instrument(
+        yf_ticker="SEB-A.ST", avanza_id="5255",
+        name="SEB A", asset_class=AssetClass.EQUITY,
+    ),
+    "INVE-B.ST": Instrument(
+        yf_ticker="INVE-B.ST", avanza_id="5247",
+        name="Investor B", asset_class=AssetClass.EQUITY,
+    ),
     "SWED-A.ST": Instrument(
         yf_ticker="SWED-A.ST", avanza_id="5241",
         name="Swedbank A", asset_class=AssetClass.EQUITY,
     ),
+    "NDA-SE.ST": Instrument(
+        yf_ticker="NDA-SE.ST", avanza_id="5249",
+        name="Nordea Bank", asset_class=AssetClass.EQUITY,
+    ),
+
+    # Technology / Gaming
+    "ERIC-B.ST": Instrument(
+        yf_ticker="ERIC-B.ST", avanza_id="5240",
+        name="Ericsson B", asset_class=AssetClass.EQUITY,
+    ),
+    "SINCH.ST": Instrument(
+        yf_ticker="SINCH.ST", avanza_id="599956",
+        name="Sinch", asset_class=AssetClass.EQUITY,
+    ),
+    "EVO.ST": Instrument(
+        yf_ticker="EVO.ST", avanza_id="549768",
+        name="Evolution AB", asset_class=AssetClass.EQUITY,
+    ),
+
+    # Consumer / Healthcare
     "HM-B.ST": Instrument(
         yf_ticker="HM-B.ST", avanza_id="5364",
         name="H&M B", asset_class=AssetClass.EQUITY,
+    ),
+    "ESSITY-B.ST": Instrument(
+        yf_ticker="ESSITY-B.ST", avanza_id="764241",
+        name="Essity B", asset_class=AssetClass.EQUITY,
+    ),
+    "AZN.ST": Instrument(
+        yf_ticker="AZN.ST", avanza_id="5431",
+        name="AstraZeneca", asset_class=AssetClass.EQUITY,
+    ),
+
+    # Telecom
+    "TELIA.ST": Instrument(
+        yf_ticker="TELIA.ST", avanza_id="5479",
+        name="Telia Company", asset_class=AssetClass.EQUITY,
     ),
 
     # ── Swedish ETFs ──────────────────────────────────────────
