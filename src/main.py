@@ -109,6 +109,7 @@ def main() -> None:
             led=led,
             state=state,
             bus=bus,
+            settings=settings,
         )
 
         # engine.start() blocks until shutdown is requested

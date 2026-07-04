@@ -61,11 +61,13 @@ class Engine:
         led:      LEDManager,
         state:    StateManager,
         bus:      EventBus,
+        settings: Optional[Settings] = None,
     ) -> None:
         self._display      = display
         self._led          = led
         self._state        = state
         self._bus          = bus
+        self._settings     = settings
         self._trade_logger = setup_trade_logger()
         self._running      = False
         self._shutdown_event          = threading.Event()
@@ -75,8 +77,6 @@ class Engine:
         self._lock                    = threading.Lock()
         self._last_heartbeat: float   = time.monotonic()
         self._heartbeat_interval: int = 300
-
-        self._settings: Optional[Settings] = None
 
         self._broker:      Optional[BaseBroker]        = None
         self._algorithm:   Optional[BaseAlgorithm]     = None
@@ -90,11 +90,7 @@ class Engine:
 
     # ── Lifecycle ─────────────────────────────────────────────
 
-    def start(
-        self,
-        broker:        BaseBroker,
-        starting_algo: str = "dual_momentum",
-    ) -> None:
+    def start(self, broker, starting_algo="dual_momentum"):
         import config
 
         logger.info("Engine starting")
@@ -107,7 +103,8 @@ class Engine:
             self._buttons     = ButtonManager(self._bus)
             self._power       = PowerManager(self._bus)
 
-            self._settings = Settings()
+            if self._settings is None:
+                self._settings = Settings()
             self._display.set_brightness(self._settings.get("display_brightness"))
             self._led.set_brightness(self._settings.get("led_brightness"))
 
@@ -218,8 +215,9 @@ class Engine:
 
         snap = self._state.snapshot()
         logger.info(
-            "Running evaluation: algo=%s mode=%s risk=%.2f",
+            "Running evaluation: algo=%s (class=%s) mode=%s risk=%.2f",
             snap.active_algorithm,
+            self._algorithm.__class__.__name__,   # confirms what's actually loaded
             snap.trading_mode.value,
             snap.risk_level,
         )
@@ -586,16 +584,26 @@ class Engine:
         self._algorithm = cls()
         logger.info("Algorithm loaded: %s", name)
 
+        try:
+            self._state.switch_algorithm(name)
+        except Exception as exc:
+            logger.error(
+                "Failed to sync StateManager algorithm to '%s': %s",
+                name, exc
+            )
+
     def _get_required_tickers(self) -> list:
+        if self._algorithm is None:
+            raise RuntimeError("No algorithm loaded")
+        
         if self._algorithm and hasattr(self._algorithm, 'required_tickers'):
             return self._algorithm.required_tickers
 
-        from algorithms.dual_momentum import CANDIDATE_TICKERS as DM_TICKERS
+        from algorithms.dual_momentum  import CANDIDATE_TICKERS as DM_TICKERS
         from algorithms.mean_reversion import UNIVERSE as MR_UNIVERSE
         from algorithms.trend_following import PRIMARY_TICKER, BOND_TICKER
 
-        snap = self._state.snapshot()
-        algo = snap.active_algorithm
+        algo = self._algorithm.name
 
         if algo == "dual_momentum":
             return DM_TICKERS
