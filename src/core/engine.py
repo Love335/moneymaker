@@ -215,9 +215,9 @@ class Engine:
 
         snap = self._state.snapshot()
         logger.info(
-            "Running evaluation: algo=%s (class=%s) mode=%s risk=%.2f",
+            "Running evaluation: algo=%s (loaded=%s) mode=%s risk=%.2f",
             snap.active_algorithm,
-            self._algorithm.__class__.__name__,   # confirms what's actually loaded
+            self._algorithm.__class__.__name__,
             snap.trading_mode.value,
             snap.risk_level,
         )
