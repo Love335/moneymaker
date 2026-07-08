@@ -246,6 +246,7 @@ class Engine:
                 history=history,
                 liquid_sek=overview.liquid_sek,
                 risk_level=snap.risk_level,
+                total_value_sek=overview.total_value_sek,
             )
 
             signals = self._algorithm.evaluate(market_snap)
@@ -284,6 +285,14 @@ class Engine:
                 # evaluation can never oversubscribe the balance.
                 remaining_cash = overview.liquid_sek
 
+                # Size positions against TOTAL account value (equity),
+                # not remaining cash. A "15% position" means 15% of the
+                # portfolio — cash only constrains what we can still buy.
+                # This keeps position sizes consistent regardless of how
+                # many positions are already open. Falls back to liquid
+                # cash if total value is missing or zero.
+                sizing_base = max(overview.total_value_sek, overview.liquid_sek)
+
                 for sig in buy_signals:
                     if sig.ticker in held_tickers:
                         logger.warning(
@@ -292,7 +301,7 @@ class Engine:
                         )
                         continue
 
-                    amount = round(overview.liquid_sek * sig.fraction, 2)
+                    amount = round(sizing_base * sig.fraction, 2)
                     if amount > remaining_cash:
                         amount = round(remaining_cash, 2)
                     if amount < 10.0:

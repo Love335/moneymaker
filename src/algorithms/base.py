@@ -65,6 +65,7 @@ class MarketSnapshot:
     history:    dict   # ticker → list[float]
     liquid_sek: float
     risk_level: float
+    total_value_sek: float = 0.0   # cash + market value of all positions
 
 
 class BaseAlgorithm(ABC):

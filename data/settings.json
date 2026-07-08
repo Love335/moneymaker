@@ -2,5 +2,6 @@
   "display_brightness": 128,
   "led_brightness": 0.5,
   "trading_mode": "REAL",
-  "active_algorithm": "mean_reversion"
+  "active_algorithm": "mean_reversion",
+  "real_pnl_baseline": 9951.77
 }
