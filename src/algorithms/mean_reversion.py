@@ -298,7 +298,9 @@ class MeanReversionAlgorithm(BaseAlgorithm):
         return round(100 - (100 / (1 + rs)), 2)
 
     def _entry_threshold(self, risk_level: float) -> float:
-        return 10.0 + 15.0 * risk_level
+        # Connors-aligned: 5 at low risk, 15 at max risk
+        # (was 10 + 15 * risk → 10–25, looser than published research)
+        return 5.0 + 10.0 * risk_level
 
     def _exit_threshold(self, risk_level: float) -> float:
         return 65.0 + 10.0 * risk_level

@@ -534,8 +534,6 @@ class Engine:
                 )
                 self._display.show_message("REAL OK")
                 logger.info("Switched to real Avanza broker")
-                self._state.update_pnl(0.0)
-                self._display.update_pnl(0.0)
                 if self._settings:
                     self._settings.set("trading_mode", new_mode.value)
 
@@ -659,4 +657,17 @@ class Engine:
     def _calculate_pnl(self, overview) -> float:
         if isinstance(self._broker, PaperBroker):
             return self._broker.get_all_time_pnl()
-        return sum(p.unrealised_pnl for p in overview.positions)
+
+        baseline = self._settings.get("real_pnl_baseline") if self._settings else None
+
+        if baseline is None:
+            baseline = overview.total_value_sek
+            if self._settings:
+                self._settings.set("real_pnl_baseline", baseline)
+            logger.info(
+                "Real P&L baseline set: %.2f SEK — all-time P&L will be "
+                "measured from this point", baseline
+            )
+            return 0.0
+
+        return round(overview.total_value_sek - baseline, 2)

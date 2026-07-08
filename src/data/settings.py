@@ -22,6 +22,7 @@ DEFAULTS: dict[str, Any] = {
     "led_brightness":     0.3,
     "trading_mode":       "PAPER",
     "active_algorithm":   "dual_momentum",
+    "real_pnl_baseline":  None,
 }
 
 class Settings:
