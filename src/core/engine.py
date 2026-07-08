@@ -254,15 +254,11 @@ class Engine:
                 logger.info("Evaluation: no trade signals generated")
                 self._display.show_message("NO SIGNAL")
             else:
-                # Split signals into sells and buys and execute sells first.
-                # This ensures the broker has freed up cash before we
-                # calculate buy sizes, preventing orders being sized against
-                # a pre-sell balance and rejected for insufficient funds.
                 sell_signals = [s for s in signals if s.action == TradeAction.SELL]
                 buy_signals  = [s for s in signals if s.action == TradeAction.BUY]
 
                 for sig in sell_signals:
-                    self._execute_signal(sig, overview.liquid_sek, snap)
+                    self._execute_signal(sig, 0.0, snap)
 
                 # Re-fetch account state so buy sizing uses post-sell balance
                 if sell_signals:
@@ -278,8 +274,36 @@ class Engine:
                             "after sells: %s", exc
                         )
 
+                # Guard: never buy a ticker we already hold. Protects
+                # against tracking/reality divergence (the triple-BOL bug).
+                # Real broker may report no positions if get_positions()
+                # is unavailable — then this guard is a no-op.
+                held_tickers = {p.ticker for p in overview.positions}
+
+                # Track remaining cash locally so several buys in one
+                # evaluation can never oversubscribe the balance.
+                remaining_cash = overview.liquid_sek
+
                 for sig in buy_signals:
-                    self._execute_signal(sig, overview.liquid_sek, snap)
+                    if sig.ticker in held_tickers:
+                        logger.warning(
+                            "Evaluation: skipping BUY %s — position "
+                            "already held according to broker", sig.ticker
+                        )
+                        continue
+
+                    amount = round(overview.liquid_sek * sig.fraction, 2)
+                    if amount > remaining_cash:
+                        amount = round(remaining_cash, 2)
+                    if amount < 10.0:
+                        logger.info(
+                            "Evaluation: skipping BUY %s — remaining "
+                            "cash %.2f SEK too small", sig.ticker, remaining_cash
+                        )
+                        continue
+
+                    result_total = self._execute_signal(sig, amount, snap)
+                    remaining_cash -= result_total
 
             # Update P&L after all trades are complete
             try:
@@ -317,27 +341,16 @@ class Engine:
     def _execute_signal(
         self,
         sig,
-        liquid_sek: float,
+        amount_sek: float,
         snap:       AppState,
-    ) -> None:
-        """Execute a single trade signal through the broker."""
-        # For SELL signals the amount is the full position value,
-        # not a fraction of liquid cash — the broker sells everything held.
-        # We still pass liquid_sek * fraction for BUY sizing, but for SELLs
-        # the broker ignores amount_sek and sells the full position anyway.
-        if sig.action == TradeAction.SELL:
-            # Pass a nominal amount — paper and real brokers both sell
-            # the entire held position regardless of this value
-            amount_sek = 0.0
-        else:
-            amount_sek = round(liquid_sek * sig.fraction, 2)
-            if amount_sek < 10.0:
-                logger.info(
-                    "Signal for %s: amount %.2f SEK too small, skipping",
-                    sig.ticker, amount_sek
-                )
-                return
-
+    ) -> float:
+        """
+        Execute a single trade signal through the broker.
+        For SELL signals amount_sek is ignored (broker sells the full
+        position). Returns the SEK actually spent on a BUY (0.0 for
+        sells, rejections, and errors) so the caller can track
+        remaining cash across multiple buys.
+        """
         action_str = sig.action.value
         logger.info(
             "Executing: %s %s (algo=%s confidence=%.2f)",
@@ -345,12 +358,12 @@ class Engine:
             sig.algorithm, sig.confidence
         )
 
-        if sig.action != TradeAction.SELL:
+        if sig.action == TradeAction.SELL:
+            self._display.show_message(f"SELL {sig.ticker[:5]}")
+        else:
             self._display.show_message(
                 f"{action_str} {sig.ticker[:5]} {amount_sek:.0f}SEK"
             )
-        else:
-            self._display.show_message(f"SELL {sig.ticker[:5]}")
 
         try:
             result = self._broker.place_order(
@@ -397,11 +410,16 @@ class Engine:
 
             self._algorithm.on_trade_executed(sig, success)
 
+            if success and sig.action == TradeAction.BUY:
+                return result.total_sek
+            return 0.0
+
         except BrokerError as exc:
             logger.error(
                 "Trade execution error for %s: %s", sig.ticker, exc
             )
             self._display.show_message("EXEC ERR")
+            return 0.0
 
     def _perform_shutdown(self) -> None:
         logger.info("Performing graceful hardware and subsystem shutdown...")
@@ -460,6 +478,26 @@ class Engine:
         logger.info("Market closed")
         self._state.set_market_open(False)
         self._display.show_message("MKT CLOSE")
+
+        # Cancel any unfilled limit orders. place_order() reports FILLED
+        # optimistically when the limit order is accepted, but a limit at
+        # the quoted price is not guaranteed to fill. Cancelling at close
+        # bounds the exposure of any unfilled order to a single session
+        # instead of letting it fill days later at a stale price.
+        if self._broker:
+            try:
+                if self._broker.cancel_all_orders():
+                    logger.info("Market close: open orders cancelled")
+                else:
+                    logger.warning(
+                        "Market close: cancel_all_orders reported failure — "
+                        "check Avanza manually for stale open orders"
+                    )
+            except Exception as exc:
+                logger.error(
+                    "Market close: error cancelling orders: %s", exc
+                )
+
         if self._algorithm:
             self._algorithm.on_market_closed()
 

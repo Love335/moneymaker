@@ -286,56 +286,62 @@ class AvanzaBroker(BaseBroker):
         action:     str,
         amount_sek: float,
     ) -> OrderResult:
-        """
-        Place a limit order at current price on the ISK account.
-
-        ticker:     Yahoo Finance ticker (translated to orderbook ID internally)
-        action:     "BUY" or "SELL"
-        amount_sek: amount in SEK to spend (BUY) or target proceeds (SELL)
-        """
         orderbook_id = self._to_orderbook_id(ticker)
 
         with self._lock:
             self._ensure_connected()
-
-            if amount_sek < MIN_ORDER_SEK:
-                return OrderResult(
-                    status=OrderStatus.REJECTED,
-                    ticker=ticker,
-                    action=action,
-                    quantity=0,
-                    executed_price=0,
-                    total_sek=0,
-                    error_message=f"Amount {amount_sek:.2f} SEK below minimum",
-                )
 
             try:
                 price = self.get_price(ticker)
                 if price <= 0:
                     raise BrokerError(f"Invalid price {price} for {ticker}")
 
-                quantity = math.floor(amount_sek / price)
-
-                if quantity <= 0:
-                    return OrderResult(
-                        status=OrderStatus.REJECTED,
-                        ticker=ticker,
-                        action=action,
-                        quantity=0,
-                        executed_price=price,
-                        total_sek=0,
-                        error_message=(
-                            f"Calculated quantity is zero after rounding to whole lot "
-                            f"(amount={amount_sek:.2f} SEK, price={price:.2f} SEK)"
-                        ),
-                    )
+                if action == "SELL":
+                    # For sells, fetch actual held quantity from Avanza
+                    # rather than relying on amount_sek which is passed as 0
+                    quantity = self._get_held_quantity(orderbook_id)
+                    if quantity <= 0:
+                        return OrderResult(
+                            status=OrderStatus.REJECTED,
+                            ticker=ticker,
+                            action=action,
+                            quantity=0,
+                            executed_price=price,
+                            total_sek=0,
+                            error_message=f"No position in {ticker} to sell",
+                        )
+                else:
+                    if amount_sek < MIN_ORDER_SEK:
+                        return OrderResult(
+                            status=OrderStatus.REJECTED,
+                            ticker=ticker,
+                            action=action,
+                            quantity=0,
+                            executed_price=0,
+                            total_sek=0,
+                            error_message=f"Amount {amount_sek:.2f} SEK below minimum",
+                        )
+                    quantity = math.floor(amount_sek / price)
+                    if quantity <= 0:
+                        return OrderResult(
+                            status=OrderStatus.REJECTED,
+                            ticker=ticker,
+                            action=action,
+                            quantity=0,
+                            executed_price=price,
+                            total_sek=0,
+                            error_message=(
+                                f"Calculated quantity is zero after rounding to whole lot "
+                                f"(amount={amount_sek:.2f} SEK, price={price:.2f} SEK)"
+                            ),
+                        )
 
                 order_type  = OrderType.BUY if action == "BUY" else OrderType.SELL
                 valid_until = date.today() + timedelta(days=ORDER_VALID_DAYS)
 
                 logger.info(
                     "AvanzaBroker: placing %s — "
-                    "ticker=%s orderbook=%s qty=%.4f "
+                    "ticker=%s orderbook=%s qty=%d "
                     "price=%.2f total=%.2f SEK",
                     action, ticker, orderbook_id,
                     quantity, price, quantity * price,
@@ -351,9 +357,7 @@ class AvanzaBroker(BaseBroker):
                 )
 
                 order_id = str(result.get("orderId", ""))
-                logger.info(
-                    "AvanzaBroker: order placed — id=%s", order_id
-                )
+                logger.info("AvanzaBroker: order placed — id=%s", order_id)
 
                 return OrderResult(
                     status=OrderStatus.FILLED,
@@ -512,3 +516,30 @@ class AvanzaBroker(BaseBroker):
             )
         except ValueError as exc:
             raise BrokerError(str(exc))
+
+    def _get_held_quantity(self, orderbook_id: str) -> int:
+        """
+        Return the whole-share quantity held for a given orderbook ID.
+        Returns 0 if position not found or positions unavailable.
+        Must be called within self._lock.
+        """
+        try:
+            raw = self._client.get_positions()
+            if isinstance(raw, dict):
+                for group in raw.get("instrumentPositions", []):
+                    for pos in group.get("positions", []):
+                        if str(pos.get("orderbookId")) == str(orderbook_id):
+                            if "accountId" in pos:
+                                if str(pos["accountId"]) != self._account_id:
+                                    continue
+                            return int(float(pos.get("volume", 0)))
+            elif isinstance(raw, list):
+                for pos in raw:
+                    if str(pos.get("orderbookId")) == str(orderbook_id):
+                        return int(float(pos.get("volume", 0)))
+        except Exception as exc:
+            logger.warning(
+                "AvanzaBroker: could not fetch position quantity "
+                "for orderbook %s: %s", orderbook_id, exc
+            )
+        return 0
